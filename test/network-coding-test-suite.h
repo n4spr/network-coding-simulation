@@ -25,7 +25,7 @@
 #include "../model/galois-field.h"
 #include "../model/network-coding-encoder.h"
 #include "../model/network-coding-decoder.h"
-#include "../model/network-coding-tcp-application.h"
+#include "../model/network-coding-udp-application.h"
 
 namespace ns3 {
 
