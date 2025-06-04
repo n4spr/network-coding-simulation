@@ -527,6 +527,7 @@ public:
     : m_nodeId (0),
       m_nodeType (INTERMEDIATE),
       m_packetSize (1024),
+      m_totalPackets (2),
       m_packetsSent (0),
       m_packetsReceived (0),
       m_running (false),
@@ -541,40 +542,46 @@ public:
     DESTINATION = 2
   };
 
-  void Setup (uint32_t nodeId, NodeType nodeType, uint16_t port, uint32_t packetSize)
+  void Setup (uint32_t nodeId, NodeType nodeType, uint16_t port, uint32_t packetSize,  uint32_t totalPackets)
   {
     m_nodeId = nodeId;
     m_nodeType = nodeType;
     m_port = port;
     m_packetSize = packetSize;
+    m_totalPackets = totalPackets;
   }
 
-  void SendOriginalPackets ()
-  {
+void SendOriginalPackets ()
+{
     if (m_nodeType != SOURCE) return;
 
     std::cout << "[TCP] Source S sending packets via multiple paths..." << std::endl;
     
-    // Use simplified approach with TCP bulk send applications
-    // Direct path 1: S -> r1 -> d1
+    // Calculate total bytes to send - EACH destination needs ALL data
+    uint32_t totalBytesToSend = m_totalPackets * m_packetSize;
+    
+    // Send ALL data to EACH destination (not split between them)
+    // Path 1: S -> r1 -> d1 (send all packets)
     ApplicationContainer app1;
     BulkSendHelper bulkSend1 ("ns3::TcpSocketFactory", InetSocketAddress ("10.1.4.2", m_port));
-    bulkSend1.SetAttribute ("MaxBytes", UintegerValue (m_packetSize));
+    bulkSend1.SetAttribute ("MaxBytes", UintegerValue (totalBytesToSend));  // ALL bytes to d1
     app1 = bulkSend1.Install (GetNode ());
     app1.Start (Seconds (1.0));
     app1.Stop (Seconds (5.0));
     
-    // Direct path 2: S -> r2 -> d2  
+    // Path 2: S -> r2 -> d2 (send all packets)
     ApplicationContainer app2;
     BulkSendHelper bulkSend2 ("ns3::TcpSocketFactory", InetSocketAddress ("10.1.6.2", m_port));
-    bulkSend2.SetAttribute ("MaxBytes", UintegerValue (m_packetSize));
+    bulkSend2.SetAttribute ("MaxBytes", UintegerValue (totalBytesToSend));  // ALL bytes to d2
     app2 = bulkSend2.Install (GetNode ());
     app2.Start (Seconds (1.0));
     app2.Stop (Seconds (5.0));
 
-    m_packetsSent = 2; // Count the two data transmissions
-    std::cout << "[TCP] Source sent data via direct paths (no network coding)" << std::endl;
-  }
+    // TCP sends duplicate data to each destination
+    m_packetsSent = m_totalPackets * 2; // Count packets sent to both destinations
+    std::cout << "[TCP] Source sending " << totalBytesToSend << " bytes to EACH destination (" 
+              << totalBytesToSend << " bytes x 2 destinations = " << (totalBytesToSend * 2) << " total bytes)" << std::endl;
+}
 
   uint32_t GetPacketsSent () const { return m_packetsSent; }
   uint32_t GetPacketsReceived () const { return m_packetsReceived; }
@@ -631,22 +638,23 @@ private:
   // FIXED: Correct callback signature for PacketSink::Rx trace
   void OnPacketReceived (Ptr<const Packet> packet, const Address& from)
   {
-    m_packetsReceived++;
-    m_totalBytesReceived += packet->GetSize();
-    
-    std::cout << "[TCP] Destination " << GetNodeName() << " received packet, size=" 
-              << packet->GetSize() << " from " << from 
-              << " (total: " << m_totalBytesReceived << " bytes)" << std::endl;
-    
-    // FIXED: For TCP, each destination should receive one packet worth of data
-    // Since TCP sends directly to each destination, we expect m_packetSize bytes per destination
-    if (m_totalBytesReceived >= m_packetSize) {
-      if (!m_receivedBothPackets) {
-        m_receivedBothPackets = true;
-        std::cout << "*** TCP DESTINATION " << GetNodeName () 
-                  << " RECEIVED COMPLETE DATA! ***" << std::endl;
+      m_packetsReceived++;
+      m_totalBytesReceived += packet->GetSize();
+      
+      // Each destination expects ALL the data (not half)
+      uint32_t expectedBytes = m_totalPackets * m_packetSize;
+      
+      std::cout << "[TCP] Destination " << GetNodeName() << " received packet, size=" 
+                << packet->GetSize() << " from " << from 
+                << " (total: " << m_totalBytesReceived << "/" << expectedBytes << " bytes)" << std::endl;
+      
+      if (m_totalBytesReceived >= expectedBytes) {
+          if (!m_receivedBothPackets) {
+              m_receivedBothPackets = true;
+              std::cout << "*** TCP DESTINATION " << GetNodeName () 
+                        << " RECEIVED COMPLETE DATA! ***" << std::endl;
+          }
       }
-    }
   }
 
   // Member variables
@@ -659,6 +667,7 @@ private:
   bool m_running;
   bool m_receivedBothPackets;
   uint32_t m_totalBytesReceived;
+  uint32_t m_totalPackets;
 };
 
 // Updated topology creation function (same as before)
@@ -896,20 +905,20 @@ NetworkStats RunTcpComparisonSimulation (const SimulationParameters& params)
   
   // Source S
   apps[0] = CreateObject<TcpButterflyApp> ();
-  apps[0]->Setup (0, TcpButterflyApp::SOURCE, params.port + 100, params.packetSize);
+  apps[0]->Setup (0, TcpButterflyApp::SOURCE, params.port + 100, params.packetSize, params.totalPackets);
   nodes.Get (0)->AddApplication (apps[0]);
   
   // Intermediate nodes (no special handling needed for TCP)
   for (int i = 1; i <= 4; i++) {
     apps[i] = CreateObject<TcpButterflyApp> ();
-    apps[i]->Setup (i, TcpButterflyApp::INTERMEDIATE, params.port + 100, params.packetSize);
+    apps[i]->Setup (i, TcpButterflyApp::INTERMEDIATE, params.port + 100, params.packetSize, params.totalPackets);
     nodes.Get (i)->AddApplication (apps[i]);
   }
   
   // Destinations d1, d2
   for (int i = 5; i <= 6; i++) {
     apps[i] = CreateObject<TcpButterflyApp> ();
-    apps[i]->Setup (i, TcpButterflyApp::DESTINATION, params.port + 100, params.packetSize);
+    apps[i]->Setup (i, TcpButterflyApp::DESTINATION, params.port + 100, params.packetSize, params.totalPackets);
     nodes.Get (i)->AddApplication (apps[i]);
   }
 

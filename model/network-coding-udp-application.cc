@@ -14,11 +14,10 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
- *
- * Author: Your Name <your.email@example.com>
  */
 
 #include "network-coding-udp-application.h"
+#include "network-coding-packet.h"
 #include "ns3/log.h"
 #include "ns3/simulator.h"
 #include "ns3/socket.h"
@@ -84,7 +83,7 @@ NetworkCodingUdpApplication::GetTypeId (void)
 
 NetworkCodingUdpApplication::NetworkCodingUdpApplication ()
   : m_socket (nullptr),
-    m_peer (), // CHANGED: Remove m_connectedSocket for UDP
+    m_peer (),
     m_packetSize (1024),
     m_numPackets (1000),
     m_generationSize (8),
@@ -105,7 +104,8 @@ NetworkCodingUdpApplication::NetworkCodingUdpApplication ()
     m_waitingForGenerationAck (false),
     m_generationTimeout (Seconds (2.0)),
     m_maxRetransmissions (5),
-    m_retransmissionCount (0)
+    m_retransmissionCount (0),
+    m_galoisField (CreateObject<GaloisField>())
 {
   NS_LOG_FUNCTION (this);
 }
@@ -113,7 +113,7 @@ NetworkCodingUdpApplication::NetworkCodingUdpApplication ()
 NetworkCodingUdpApplication::~NetworkCodingUdpApplication ()
 {
   NS_LOG_FUNCTION (this);
-}   
+}
 
 void
 NetworkCodingUdpApplication::DoDispose (void)
@@ -122,37 +122,10 @@ NetworkCodingUdpApplication::DoDispose (void)
   m_socket = nullptr;
   m_encoder = nullptr;
   m_decoder = nullptr;
+  m_galoisField = nullptr;
   Simulator::Cancel (m_sendEvent);
   Simulator::Cancel (m_retransmissionTimer);
   Application::DoDispose ();
-}
-
-void
-NetworkCodingUdpApplication::Setup (Ptr<Socket> socket, Address address, uint16_t packetSize, 
-                                   uint32_t numPackets, uint16_t generationSize, 
-                                   DataRate dataRate, double lossRate)
-{
-  NS_LOG_FUNCTION (this << socket << address << packetSize << numPackets 
-                   << generationSize << dataRate << lossRate);
-  
-  m_socket = socket;
-  m_peer = address;
-  m_packetSize = packetSize;
-  m_numPackets = numPackets;
-  m_generationSize = generationSize;
-  m_dataRate = dataRate;
-  m_lossRate = lossRate;
-  
-  if (m_encoder)
-    {
-      m_encoder->SetGenerationSize (generationSize);
-      m_encoder->SetPacketSize (packetSize);
-    }
-  if (m_decoder)
-    {
-      m_decoder->SetGenerationSize (generationSize);
-      m_decoder->SetPacketSize (packetSize);
-    }
 }
 
 void
@@ -173,56 +146,105 @@ NetworkCodingUdpApplication::StartApplication (void)
   m_waitingForGenerationAck = false;
   m_retransmissionCount = 0;
   
-  if (!m_encoder || !m_decoder)
-    {
-      NS_LOG_INFO ("Initializing encoder/decoder with generation size " << m_generationSize 
-                   << " and packet size " << m_packetSize);
-      
-      m_encoder = CreateObject<NetworkCodingEncoder> (m_generationSize, m_packetSize);
-      m_decoder = CreateObject<NetworkCodingDecoder> (m_generationSize, m_packetSize);
-      
-      if (!m_encoder || !m_decoder)
-        {
-          NS_FATAL_ERROR ("Failed to create encoder or decoder");
-        }
-      
-      NS_LOG_INFO ("Encoder and decoder initialized successfully");
-    }
+  // Initialize REAL encoder and decoder
+  NS_LOG_INFO ("Initializing REAL encoder/decoder with generation size " << m_generationSize 
+               << " and packet size " << m_packetSize);
+  
+  m_encoder = CreateObject<NetworkCodingEncoder> (m_generationSize, m_packetSize);
+  m_decoder = CreateObject<NetworkCodingDecoder> (m_generationSize, m_packetSize);
+  
+  if (!m_encoder || !m_decoder) {
+    NS_FATAL_ERROR ("Failed to create REAL encoder or decoder");
+  }
+  
+  NS_LOG_INFO ("REAL Network Coding encoder and decoder initialized successfully");
 
-  if (!m_socket)
-    {
-      m_socket = Socket::CreateSocket (GetNode (), UdpSocketFactory::GetTypeId ()); // CHANGED: Use UDP
+  if (!m_socket) {
+    m_socket = Socket::CreateSocket (GetNode (), UdpSocketFactory::GetTypeId ());
+    
+    bool isReceiver = (m_numPackets == 0);
+    
+    if (isReceiver) {
+      NS_LOG_INFO ("Setting up as REAL NETWORK CODING RECEIVER");
+      if (InetSocketAddress::IsMatchingType (m_peer)) {
+        InetSocketAddress local = InetSocketAddress::ConvertFrom (m_peer);
+        m_socket->Bind (InetSocketAddress (Ipv4Address::GetAny (), local.GetPort ()));
+      } else if (Inet6SocketAddress::IsMatchingType (m_peer)) {
+        Inet6SocketAddress local = Inet6SocketAddress::ConvertFrom (m_peer);
+        m_socket->Bind (Inet6SocketAddress (Ipv6Address::GetAny (), local.GetPort ()));
+      }
+    } else {
+      NS_LOG_INFO ("Setting up as REAL NETWORK CODING SENDER");
+      m_socket->Bind ();
       
-      bool isReceiver = (m_numPackets == 0);
-      
-      if (isReceiver)
-        {
-          NS_LOG_INFO ("Setting up as RECEIVER");
-          if (InetSocketAddress::IsMatchingType (m_peer))
-            {
-              InetSocketAddress local = InetSocketAddress::ConvertFrom (m_peer);
-              m_socket->Bind (InetSocketAddress (Ipv4Address::GetAny (), local.GetPort ()));
-            }
-          else if (Inet6SocketAddress::IsMatchingType (m_peer))
-            {
-              Inet6SocketAddress local = Inet6SocketAddress::ConvertFrom (m_peer);
-              m_socket->Bind (Inet6SocketAddress (Ipv6Address::GetAny (), local.GetPort ()));
-            }
-        }
-      else
-        {
-          NS_LOG_INFO ("Setting up as SENDER");
-          m_socket->Bind ();
-          
-          // CHANGED: UDP doesn't need connection setup, start sending immediately
-          if (m_numPackets > 0)
-            {
-              ScheduleNext ();
-            }
-        }
+      if (m_numPackets > 0) {
+        // FIXED: Generate packets per generation instead of all at once
+        GenerateOriginalPackets();
+        ScheduleNext ();
+      }
     }
+  }
   
   m_socket->SetRecvCallback (MakeCallback (&NetworkCodingUdpApplication::HandleRead, this));
+}
+
+// FIXED: Generate original packets per generation
+void
+NetworkCodingUdpApplication::GenerateOriginalPackets (void)
+{
+  NS_LOG_FUNCTION (this);
+  
+  if (!m_encoder) {
+    NS_LOG_ERROR ("No encoder available for generating original packets");
+    return;
+  }
+  
+  NS_LOG_INFO ("Setting up encoder for generation-based packet creation...");
+  
+  // DON'T add all packets at once - add them per generation
+  // Just add the first generation initially
+  AddPacketsToCurrentGeneration(0);  // Start with generation 0
+  
+  NS_LOG_INFO ("Encoder prepared for generation-based coding");
+}
+
+// FIXED: Add packets for specific generation to encoder
+void
+NetworkCodingUdpApplication::AddPacketsToCurrentGeneration (uint32_t generationId)
+{
+  NS_LOG_FUNCTION (this << generationId);
+  
+  if (!m_encoder) {
+    NS_LOG_ERROR ("No encoder available");
+    return;
+  }
+  
+  uint32_t startPacket = generationId * m_generationSize;
+  uint32_t endPacket = std::min(startPacket + m_generationSize, m_numPackets);
+  
+  NS_LOG_INFO ("Adding packets " << startPacket << "-" << (endPacket-1) 
+               << " to encoder for generation " << generationId);
+  
+  for (uint32_t i = startPacket; i < endPacket; i++) {
+    // Create REAL packet data with identifiable pattern
+    std::vector<uint8_t> data(m_packetSize);
+    for (uint32_t j = 0; j < m_packetSize; j++) {
+      data[j] = (uint8_t)((i * 123 + j * 7) % 256);  // Same pattern as before
+    }
+    
+    Ptr<Packet> originalPacket = Create<Packet>(data.data(), m_packetSize);
+    
+    // Add to encoder with LOCAL sequence number (0, 1, 2, ...)
+    uint32_t localSeq = i - startPacket;
+    bool added = m_encoder->AddPacket(originalPacket, localSeq);
+    
+    if (added) {
+      NS_LOG_INFO ("Added packet " << i << " (local_seq=" << localSeq 
+                   << ") to encoder for generation " << generationId);
+    } else {
+      NS_LOG_ERROR ("Failed to add packet " << i << " to encoder");
+    }
+  }
 }
 
 void
@@ -235,19 +257,16 @@ NetworkCodingUdpApplication::StopApplication (void)
   Simulator::Cancel (m_sendEvent);
   Simulator::Cancel (m_retransmissionTimer);
   
-  if (m_socket)
-    {
-      m_socket->Close ();
-      m_socket->SetRecvCallback (MakeNullCallback<void, Ptr<Socket>> ());
-    }
+  if (m_socket) {
+    m_socket->Close ();
+    m_socket->SetRecvCallback (MakeNullCallback<void, Ptr<Socket>> ());
+  }
   
-  NS_LOG_INFO ("Application stopped. Packets sent: " << m_packetsSent 
+  NS_LOG_INFO ("REAL Network Coding Application stopped. Packets sent: " << m_packetsSent 
                << ", Packets received: " << m_packetsReceived
                << ", Innovative packets: " << m_innovativePacketsReceived
                << ", Generations decoded: " << m_generationsDecoded);
 }
-
-// REMOVED: ConnectionSucceeded, ConnectionFailed, HandleConnectionRequest, HandleAccept (UDP doesn't need these)
 
 void
 NetworkCodingUdpApplication::HandleRead (Ptr<Socket> socket)
@@ -257,123 +276,180 @@ NetworkCodingUdpApplication::HandleRead (Ptr<Socket> socket)
   Ptr<Packet> packet;
   Address from;
   
-  while ((packet = socket->RecvFrom (from)))
-    {
-      if (packet->GetSize () == 0)
-        {
-          break;
-        }
-      
-      m_packetsReceived++;
-      m_rxTrace (packet);
-      
-      NS_LOG_INFO ("Received packet of size " << packet->GetSize () 
-                   << " from " << from << ". Total received: " << m_packetsReceived);
-      
-      // Check if this is an ACK packet
-      if (IsAckPacket (packet))
-        {
-          HandleAck (packet);
-          continue;
-        }
-      
-      if (m_decoder)
-        {
-          bool isInnovative = ProcessReceivedPacket (packet);
-          
-          if (isInnovative)
-            {
-              m_innovativePacketsReceived++;
-              m_generationPacketCount++;
-              NS_LOG_INFO ("Received innovative packet. Total innovative: " 
-                           << m_innovativePacketsReceived 
-                           << ", Generation packets: " << m_generationPacketCount);
-              
-              // Check if we have enough packets to decode the current generation
-              if (m_generationPacketCount >= m_generationSize)
-                {
-                  m_generationsDecoded++;
-                  m_decodingTrace (true, m_generationsDecoded);
-                  NS_LOG_INFO ("Generation " << m_currentGeneration << " decoded! Total decoded: " << m_generationsDecoded);
-                  
-                  // Send ACK to sender
-                  SendAck (m_currentGeneration, from); // CHANGED: Pass sender address
-                  
-                  // Reset for next generation
-                  m_currentGeneration++;
-                  m_generationPacketCount = 0;
-                }
-            }
-          else
-            {
-              NS_LOG_INFO ("Received redundant packet");
-            }
-        }
+  while ((packet = socket->RecvFrom (from))) {
+    if (packet->GetSize () == 0) {
+      break;
     }
+    
+    m_packetsReceived++;
+    m_rxTrace (packet);
+    
+    NS_LOG_INFO ("Received packet of size " << packet->GetSize () 
+                 << " from " << from << ". Total received: " << m_packetsReceived);
+    
+    // Check if this is an ACK packet
+    if (IsAckPacket (packet)) {
+      HandleAck (packet);
+      continue;
+    }
+    
+    // Process as REAL coded packet
+    bool isInnovative = ProcessRealCodedPacket (packet);
+    
+    if (isInnovative) {
+      m_innovativePacketsReceived++;
+      m_generationPacketCount++;
+      NS_LOG_INFO ("Received INNOVATIVE coded packet. Total innovative: " 
+                   << m_innovativePacketsReceived 
+                   << ", Generation packets: " << m_generationPacketCount);
+      
+      // Check if we can decode the current generation
+      if (m_decoder && m_decoder->CanDecode()) {
+        m_generationsDecoded++;
+        m_decodingTrace (true, m_generationsDecoded);
+        
+        // REAL DECODING HAPPENED!
+        auto decodedPackets = m_decoder->GetDecodedPackets();
+        
+        NS_LOG_INFO ("*** GENERATION " << m_currentGeneration 
+                     << " SUCCESSFULLY DECODED! ***");
+        NS_LOG_INFO ("Recovered " << decodedPackets.size() << " original packets");
+        
+        // Verify decoded packets
+        VerifyDecodedPackets(decodedPackets, m_currentGeneration);
+        
+        // Send ACK to sender
+        SendAck (m_currentGeneration, from);
+        
+        // FIXED: Don't advance generation here - let ProcessRealCodedPacket handle it
+        // Reset packet count for current generation
+        m_generationPacketCount = 0;
+        
+        // FIXED: Don't create new decoder here - let ProcessRealCodedPacket manage it
+      }
+    } else {
+      NS_LOG_INFO ("Received NON-INNOVATIVE coded packet (redundant)");
+    }
+  }
 }
 
+// FIXED: Process REAL coded packets using decoder
 bool
-NetworkCodingUdpApplication::ProcessReceivedPacket (Ptr<Packet> packet)
+NetworkCodingUdpApplication::ProcessRealCodedPacket (Ptr<Packet> packet)
 {
   NS_LOG_FUNCTION (this << packet);
   
-  if (!m_decoder)
-    {
-      NS_LOG_ERROR ("No decoder available");
+  if (!m_decoder) {
+    NS_LOG_ERROR ("No decoder available");
+    return false;
+  }
+  
+  // Make a copy to extract header
+  Ptr<Packet> packetCopy = packet->Copy();
+  
+  // Extract network coding header
+  NetworkCodingHeader header;
+  try {
+    packetCopy->RemoveHeader(header);
+  } catch (...) {
+    NS_LOG_ERROR ("Failed to extract network coding header from received packet");
+    return false;
+  }
+  
+  uint32_t generationId = header.GetGenerationId();
+  const std::vector<uint8_t>& coefficients = header.GetCoefficients();
+  
+  NS_LOG_INFO ("Processing REAL coded packet for generation " << generationId 
+               << " with coefficients [");
+  for (size_t i = 0; i < coefficients.size(); i++) {
+    std::cout << (int)coefficients[i];
+    if (i < coefficients.size() - 1) std::cout << ",";
+  }
+  std::cout << "]" << std::endl;
+  
+  // CRITICAL FIX: Handle generation transitions properly
+  if (generationId != m_currentGeneration) {
+    if (generationId > m_currentGeneration) {
+      // Advance to the new generation
+      NS_LOG_INFO ("Advancing receiver from generation " << m_currentGeneration 
+                   << " to generation " << generationId);
+      
+      // Move to the correct generation
+      while (m_currentGeneration < generationId) {
+        m_currentGeneration++;
+        m_generationPacketCount = 0;
+        
+        // Create fresh decoder for the new generation
+        m_decoder = CreateObject<NetworkCodingDecoder> (m_generationSize, m_packetSize);
+        
+        // Advance decoder's internal generation counter
+        for (uint32_t i = 0; i < m_currentGeneration; i++) {
+          m_decoder->NextGeneration();
+        }
+      }
+      
+      NS_LOG_INFO ("Receiver now at generation " << m_currentGeneration);
+    } else {
+      // Old generation packet - ignore
+      NS_LOG_INFO ("Received packet from old generation " << generationId 
+                   << " (current " << m_currentGeneration << "), ignoring");
       return false;
     }
+  }
   
-  uint32_t packetSize = packet->GetSize();
+  // Use REAL decoder to process coded packet
+  bool innovative = m_decoder->ProcessCodedPacket(packet);
   
-  // Validate packet size
-  if (packetSize != m_packetSize)
-    {
-      NS_LOG_WARN ("Received packet of unexpected size " << packetSize 
-                   << ", expected " << m_packetSize << ". Ignoring.");
-      return false;
+  NS_LOG_INFO ("Decoder processed packet: innovative = " << innovative 
+               << ", can decode = " << m_decoder->CanDecode());
+  
+  return innovative;
+}
+
+// FIXED: Verify that decoded packets match original patterns
+void
+NetworkCodingUdpApplication::VerifyDecodedPackets (const std::vector<Ptr<Packet>>& decodedPackets,
+                                                  uint32_t generationId)
+{
+  NS_LOG_FUNCTION (this << decodedPackets.size() << generationId);
+  
+  for (size_t i = 0; i < decodedPackets.size(); i++) {
+    uint32_t originalSeq = generationId * m_generationSize + i;
+    
+    // Extract decoded data
+    std::vector<uint8_t> decodedData(m_packetSize);
+    decodedPackets[i]->CopyData(decodedData.data(), m_packetSize);
+    
+    // Generate expected original pattern
+    std::vector<uint8_t> expectedData(m_packetSize);
+    for (uint32_t j = 0; j < m_packetSize; j++) {
+      expectedData[j] = (uint8_t)((originalSeq * 123 + j * 7) % 256);
     }
-  
-  uint8_t* buffer = new uint8_t[packetSize];
-  packet->CopyData(buffer, packetSize);
-  
-  // Extract generation ID from first 4 bytes
-  uint32_t packetGeneration = 0;
-  if (packetSize >= 4)
-    {
-      packetGeneration = (buffer[0] << 24) | (buffer[1] << 16) | (buffer[2] << 8) | buffer[3];
+    
+    // Verify match
+    bool matches = (decodedData == expectedData);
+    
+    NS_LOG_INFO ("Decoded packet " << i << " (seq=" << originalSeq 
+                 << "): " << (matches ? "CORRECT" : "INCORRECT"));
+    
+    if (!matches) {
+      NS_LOG_ERROR ("VERIFICATION FAILED for packet " << originalSeq);
+      // Print first few bytes for debugging
+      std::cout << "Expected: [";
+      for (size_t k = 0; k < std::min(size_t(8), expectedData.size()); k++) {
+        std::cout << (int)expectedData[k];
+        if (k < 7 && k < expectedData.size() - 1) std::cout << ",";
+      }
+      std::cout << "]" << std::endl;
+      
+      std::cout << "Decoded:  [";
+      for (size_t k = 0; k < std::min(size_t(8), decodedData.size()); k++) {
+        std::cout << (int)decodedData[k];
+        if (k < 7 && k < decodedData.size() - 1) std::cout << ",";
+      }
+      std::cout << "]" << std::endl;
     }
-  
-  NS_LOG_INFO ("Processing packet for generation " << packetGeneration 
-               << ", current generation: " << m_currentGeneration
-               << ", size: " << packetSize);
-  
-  // ONLY move to new generation if it's exactly the next expected generation
-  if (packetGeneration != m_currentGeneration)
-    {
-      if (packetGeneration == m_currentGeneration + 1)  // Only accept next generation
-        {
-          NS_LOG_INFO ("Moving to new generation " << packetGeneration);
-          m_currentGeneration = packetGeneration;
-          m_generationPacketCount = 0;
-        }
-      else
-        {
-          NS_LOG_INFO ("Received packet from unexpected generation " << packetGeneration 
-                       << " (expected " << m_currentGeneration << "), ignoring");
-          delete[] buffer;
-          return false;
-        }
-    }
-  
-  // Simple innovation check based on generation position
-  bool isInnovative = (m_generationPacketCount < m_generationSize);
-  
-  NS_LOG_INFO ("Added packet to decoder for generation " << packetGeneration 
-               << ", innovative: " << isInnovative 
-               << " (packets in generation: " << m_generationPacketCount << "/" << m_generationSize << ")");
-  
-  delete[] buffer;
-  return isInnovative;
+  }
 }
 
 void
@@ -381,52 +457,32 @@ NetworkCodingUdpApplication::ScheduleNext (void)
 {
   NS_LOG_FUNCTION (this);
   
-  // Calculate total generations needed
   uint32_t totalGenerationsNeeded = (m_numPackets + m_generationSize - 1) / m_generationSize;
   
-  // Check if we still have generations to send
   bool hasMoreGenerations = (m_currentGenerationSent < totalGenerationsNeeded);
-  
-  // For the current generation, check if we still have packets to send
   bool hasMorePacketsInCurrentGeneration = false;
-  if (hasMoreGenerations)
-    {
-      uint32_t packetsNeededInCurrentGeneration = m_generationSize;
-      if (m_currentGenerationSent == totalGenerationsNeeded - 1) // Last generation
-        {
-          uint32_t remainingPackets = m_numPackets - (m_currentGenerationSent * m_generationSize);
-          packetsNeededInCurrentGeneration = remainingPackets;
-        }
-      hasMorePacketsInCurrentGeneration = (m_packetsInCurrentGeneration < packetsNeededInCurrentGeneration);
+  
+  if (hasMoreGenerations) {
+    uint32_t packetsNeededInCurrentGeneration = m_generationSize;
+    if (m_currentGenerationSent == totalGenerationsNeeded - 1) {
+      uint32_t remainingPackets = m_numPackets - (m_currentGenerationSent * m_generationSize);
+      packetsNeededInCurrentGeneration = remainingPackets;
     }
+    hasMorePacketsInCurrentGeneration = (m_packetsInCurrentGeneration < packetsNeededInCurrentGeneration);
+  }
   
   NS_LOG_INFO ("ScheduleNext: Generation " << m_currentGenerationSent 
                << "/" << totalGenerationsNeeded 
                << ", packets in current gen: " << m_packetsInCurrentGeneration
                << ", waiting for ACK: " << m_waitingForGenerationAck);
   
-  if (m_running && hasMoreGenerations && hasMorePacketsInCurrentGeneration && !m_waitingForGenerationAck)
-    {
-      Time tNext = Seconds (m_packetSize * 8 / static_cast<double> (m_dataRate.GetBitRate ()));
-      m_sendEvent = Simulator::Schedule (tNext, &NetworkCodingUdpApplication::SendPacket, this);
-      NS_LOG_DEBUG ("Scheduled next packet in " << tNext.GetSeconds () << " seconds");
-    }
-  else if (m_waitingForGenerationAck)
-    {
-      NS_LOG_INFO ("Waiting for generation ACK, not scheduling next packet");
-    }
-  else if (!hasMoreGenerations)
-    {
-      NS_LOG_INFO ("All " << totalGenerationsNeeded << " generations completed");
-    }
-  else if (!hasMorePacketsInCurrentGeneration)
-    {
-      NS_LOG_INFO ("Current generation " << m_currentGenerationSent << " completed, waiting for ACK");
-    }
-  else
-    {
-      NS_LOG_INFO ("Finished sending all packets or application stopped");
-    }
+  if (m_running && hasMoreGenerations && hasMorePacketsInCurrentGeneration && !m_waitingForGenerationAck) {
+    Time tNext = Seconds (m_packetSize * 8 / static_cast<double> (m_dataRate.GetBitRate ()));
+    m_sendEvent = Simulator::Schedule (tNext, &NetworkCodingUdpApplication::SendPacket, this);
+    NS_LOG_DEBUG ("Scheduled next REAL coded packet in " << tNext.GetSeconds () << " seconds");
+  } else if (!hasMoreGenerations) {
+    NS_LOG_INFO ("All " << totalGenerationsNeeded << " generations completed");
+  }
 }
 
 void
@@ -436,111 +492,90 @@ NetworkCodingUdpApplication::SendPacket (void)
   
   uint32_t totalGenerationsNeeded = (m_numPackets + m_generationSize - 1) / m_generationSize;
   
-  if (!m_running || !m_socket || m_currentGenerationSent >= totalGenerationsNeeded)
-    {
-      NS_LOG_INFO ("SendPacket: stopping - running: " << m_running 
-                   << ", socket: " << (m_socket ? "yes" : "no")
-                   << ", current gen: " << m_currentGenerationSent 
-                   << "/" << totalGenerationsNeeded);
-      return;
-    }
+  if (!m_running || !m_socket || m_currentGenerationSent >= totalGenerationsNeeded) {
+    return;
+  }
   
-  if (m_waitingForGenerationAck && IsCurrentGenerationComplete ())
-    {
-      NS_LOG_INFO ("Waiting for ACK for generation " << m_currentGenerationSent 
-                   << ", not sending more packets");
-      return;
-    }
+  if (m_waitingForGenerationAck && IsCurrentGenerationComplete ()) {
+    NS_LOG_INFO ("Waiting for ACK for generation " << m_currentGenerationSent);
+    return;
+  }
   
-  SendCodedPacket (m_currentGenerationSent);
+  SendRealCodedPacket (m_currentGenerationSent);
   
-  if (IsCurrentGenerationComplete ())
-    {
-      m_waitingForGenerationAck = true;
-      
-      m_retransmissionTimer = Simulator::Schedule (m_generationTimeout, 
-                                                   &NetworkCodingUdpApplication::HandleGenerationTimeout, 
-                                                   this);
-      
-      NS_LOG_INFO ("Completed generation " << m_currentGenerationSent 
-                   << ", waiting for ACK");
-    }
-  else
-    {
-      ScheduleNext ();
-    }
+  if (IsCurrentGenerationComplete ()) {
+    m_waitingForGenerationAck = true;
+    
+    m_retransmissionTimer = Simulator::Schedule (m_generationTimeout, 
+                                                 &NetworkCodingUdpApplication::HandleGenerationTimeout, 
+                                                 this);
+    
+    NS_LOG_INFO ("Completed generation " << m_currentGenerationSent << ", waiting for ACK");
+  } else {
+    ScheduleNext ();
+  }
 }
 
+// FIXED: Send REAL coded packets using encoder with correct generation
 void
-NetworkCodingUdpApplication::SendCodedPacket (uint32_t generationId)
+NetworkCodingUdpApplication::SendRealCodedPacket (uint32_t generationId)
 {
   NS_LOG_FUNCTION (this << generationId);
   
-  if (!m_encoder)
-    {
-      return;
-    }
+  if (!m_encoder) {
+    NS_LOG_ERROR ("No encoder available for sending coded packets");
+    return;
+  }
   
   uint32_t totalGenerationsNeeded = (m_numPackets + m_generationSize - 1) / m_generationSize;
-  if (generationId >= totalGenerationsNeeded)
-    {
-      NS_LOG_INFO ("All generations completed, not sending more packets");
-      return;
-    }
+  if (generationId >= totalGenerationsNeeded) {
+    NS_LOG_INFO ("All generations completed, not sending more packets");
+    return;
+  }
   
   uint32_t packetsInThisGeneration = m_generationSize;
-  if (generationId == totalGenerationsNeeded - 1)
-    {
-      uint32_t remainingPackets = m_numPackets - (generationId * m_generationSize);
-      packetsInThisGeneration = remainingPackets;
-    }
+  if (generationId == totalGenerationsNeeded - 1) {
+    uint32_t remainingPackets = m_numPackets - (generationId * m_generationSize);
+    packetsInThisGeneration = remainingPackets;
+  }
   
-  if (m_packetsInCurrentGeneration >= packetsInThisGeneration)
-    {
-      NS_LOG_INFO ("Generation " << generationId << " already complete (" 
-                   << m_packetsInCurrentGeneration << "/" << packetsInThisGeneration << ")");
-      return;
-    }
+  // FIXED: Allow retransmissions even if initial packets were sent
+  // Remove this blocking condition:
+  // if (m_packetsInCurrentGeneration >= packetsInThisGeneration) {
+  //   NS_LOG_INFO ("Generation " << generationId << " already complete");
+  //   return;
+  // }
   
-  uint32_t encodedSize = m_packetSize;
-  uint8_t* encodedData = new uint8_t[encodedSize];
+  // Generate REAL coded packet using encoder
+  Ptr<Packet> codedPacket = m_encoder->GenerateCodedPacket();
   
-  encodedData[0] = (generationId >> 24) & 0xFF;
-  encodedData[1] = (generationId >> 16) & 0xFF;
-  encodedData[2] = (generationId >> 8) & 0xFF;
-  encodedData[3] = generationId & 0xFF;
+  if (!codedPacket) {
+    NS_LOG_ERROR ("Failed to generate coded packet from encoder");
+    return;
+  }
   
-  uint32_t globalPacketIndex = generationId * m_generationSize + m_packetsInCurrentGeneration;
-  for (uint32_t i = 4; i < encodedSize; i++)
-    {
-      encodedData[i] = (uint8_t)((globalPacketIndex + i) % 256);
-    }
+  // Update generation ID in packet header
+  Ptr<Packet> packetCopy = codedPacket->Copy();
+  NetworkCodingHeader header;
+  packetCopy->RemoveHeader(header);
+  header.SetGenerationId(generationId);
+  packetCopy->AddHeader(header);
   
-  Ptr<Packet> packet = Create<Packet> (encodedData, encodedSize);
+  NS_LOG_INFO ("Sending REAL coded packet for generation " << generationId
+               << " (retransmission allowed)");
   
-  NS_LOG_INFO ("Sending encoded packet " << (globalPacketIndex + 1) 
-               << "/" << m_numPackets << " of size " << encodedSize
-               << " for generation " << generationId 
-               << " (packet " << (m_packetsInCurrentGeneration + 1) << "/" << packetsInThisGeneration << " in generation)");
-  
-  // CHANGED: Use SendTo for UDP
-  int actual = m_socket->SendTo (packet, 0, m_peer);
-  if (actual > 0)
-    {
-      m_packetsSent++;
+  // Send the packet
+  int actual = m_socket->SendTo (packetCopy, 0, m_peer);
+  if (actual > 0) {
+    m_packetsSent++;
+    // FIXED: Only count initial packets, not retransmissions
+    if (!m_waitingForGenerationAck) {
       m_packetsInCurrentGeneration++;
-      m_txTrace (packet);
-      NS_LOG_INFO ("Successfully sent packet " << m_packetsSent << "/" << m_numPackets);
     }
-  else
-    {
-      NS_LOG_WARN ("Failed to send packet, socket send returned: " << actual);
-    }
-  
-  delete[] encodedData;
+    m_txTrace (packetCopy);
+  }
 }
 
-// CHANGED: SendAck now takes sender address parameter
 void
 NetworkCodingUdpApplication::SendAck (uint32_t generationId, Address senderAddress)
 {
@@ -558,15 +593,11 @@ NetworkCodingUdpApplication::SendAck (uint32_t generationId, Address senderAddre
   
   Ptr<Packet> ackPacket = Create<Packet> (ackData, 8);
   
-  // CHANGED: Use SendTo with sender address for UDP
-  if (m_socket && m_socket->SendTo (ackPacket, 0, senderAddress) > 0)
-    {
-      NS_LOG_INFO ("Sent ACK for generation " << generationId << " to " << senderAddress);
-    }
-  else
-    {
-      NS_LOG_WARN ("Failed to send ACK for generation " << generationId);
-    }
+  if (m_socket && m_socket->SendTo (ackPacket, 0, senderAddress) > 0) {
+    NS_LOG_INFO ("Sent ACK for DECODED generation " << generationId << " to " << senderAddress);
+  } else {
+    NS_LOG_WARN ("Failed to send ACK for generation " << generationId);
+  }
 }
 
 void
@@ -574,82 +605,46 @@ NetworkCodingUdpApplication::HandleGenerationTimeout (void)
 {
   NS_LOG_FUNCTION (this);
   
-  if (!m_waitingForGenerationAck)
-    {
-      return;
-    }
+  if (!m_waitingForGenerationAck) {
+    NS_LOG_INFO ("Generation " << m_currentGenerationSent << " already complete");
+    return;
+  }
   
   m_retransmissionCount++;
   NS_LOG_INFO ("Generation " << m_currentGenerationSent << " timeout (attempt " 
                << m_retransmissionCount << "/" << m_maxRetransmissions << ")");
   
-  if (m_retransmissionCount < m_maxRetransmissions)
-    {
-      uint32_t packetsToSend = m_generationSize;
-      
-      NS_LOG_INFO ("Sending " << packetsToSend << " additional coded packets for generation " 
-                   << m_currentGenerationSent);
-      
-      for (uint32_t i = 0; i < packetsToSend; i++)
-        {
-          uint32_t encodedSize = m_packetSize;
-          uint8_t* encodedData = new uint8_t[encodedSize];
-          
-          encodedData[0] = (m_currentGenerationSent >> 24) & 0xFF;
-          encodedData[1] = (m_currentGenerationSent >> 16) & 0xFF;
-          encodedData[2] = (m_currentGenerationSent >> 8) & 0xFF;
-          encodedData[3] = m_currentGenerationSent & 0xFF;
-          
-          for (uint32_t j = 4; j < encodedSize; j++)
-            {
-              encodedData[j] = (uint8_t)((m_currentGenerationSent * 256 + m_retransmissionCount * 10 + i + j) % 256);
-            }
-          
-          Ptr<Packet> packet = Create<Packet> (encodedData, encodedSize);
-          
-          NS_LOG_INFO ("Sending redundant packet " << (i + 1) << "/" << packetsToSend 
-                       << " for generation " << m_currentGenerationSent 
-                       << " (retransmission " << m_retransmissionCount << ")");
-          
-          // CHANGED: Use SendTo for UDP
-          if (m_socket && m_socket->SendTo (packet, 0, m_peer) > 0)
-            {
-              m_txTrace (packet);
-              NS_LOG_INFO ("Successfully sent redundant packet");
-            }
-          else
-            {
-              NS_LOG_WARN ("Failed to send redundant packet");
-            }
-          
-          delete[] encodedData;
-        }
-      
-      m_retransmissionTimer = Simulator::Schedule (m_generationTimeout, 
-                                                   &NetworkCodingUdpApplication::HandleGenerationTimeout, 
-                                                   this);
+  if (m_retransmissionCount < m_maxRetransmissions) {
+    // FIXED: Send additional REAL coded packets for retransmission
+    NS_LOG_INFO ("Retransmitting packets for generation " << m_currentGenerationSent);
+    
+    // Send more coded packets to overcome packet loss
+    uint32_t packetsToSend = m_generationSize; // Send at least generation size packets
+    for (uint32_t i = 0; i < packetsToSend; i++) {
+      SendRealCodedPacket(m_currentGenerationSent);
     }
-  else
-    {
-      NS_LOG_WARN ("Maximum retransmissions reached for generation " << m_currentGenerationSent);
-      
-      m_waitingForGenerationAck = false;
-      m_retransmissionCount = 0;
-      
-      uint32_t totalGenerationsNeeded = (m_numPackets + m_generationSize - 1) / m_generationSize;
-      if (m_currentGenerationSent + 1 < totalGenerationsNeeded)
-        {
-          MoveToNextGeneration ();
-          ScheduleNext ();
-        }
-      else
-        {
-          NS_LOG_INFO ("All generations attempted");
-        }
+    
+    // Schedule next timeout
+    m_retransmissionTimer = Simulator::Schedule (m_generationTimeout, 
+                                                 &NetworkCodingUdpApplication::HandleGenerationTimeout, 
+                                                 this);
+  } else {
+    NS_LOG_WARN ("Maximum retransmissions reached for generation " << m_currentGenerationSent);
+    
+    m_waitingForGenerationAck = false;
+    m_retransmissionCount = 0;
+    
+    uint32_t totalGenerationsNeeded = (m_numPackets + m_generationSize - 1) / m_generationSize;
+    if (m_currentGenerationSent + 1 < totalGenerationsNeeded) {
+      MoveToNextGeneration ();
+      ScheduleNext ();
+    } else {
+      NS_LOG_INFO ("All generations attempted");
     }
+  }
 }
 
-// New method: Move to next generation
+// FIXED: Move to next generation and set up encoder
 void
 NetworkCodingUdpApplication::MoveToNextGeneration (void)
 {
@@ -658,17 +653,26 @@ NetworkCodingUdpApplication::MoveToNextGeneration (void)
   m_currentGenerationSent++;
   m_packetsInCurrentGeneration = 0;
   
+  // CRITICAL FIX: Advance encoder to next generation!
+  if (m_encoder) {
+    m_encoder->NextGeneration();
+    
+    // Add packets for the new generation
+    uint32_t totalGenerationsNeeded = (m_numPackets + m_generationSize - 1) / m_generationSize;
+    if (m_currentGenerationSent < totalGenerationsNeeded) {
+      AddPacketsToCurrentGeneration(m_currentGenerationSent);
+    }
+  }
+  
   NS_LOG_INFO ("Moved to sending generation " << m_currentGenerationSent);
 }
 
-// New method: Check if packet is ACK
 bool
 NetworkCodingUdpApplication::IsAckPacket (Ptr<Packet> packet)
 {
-  if (packet->GetSize () != 8)
-    {
-      return false;
-    }
+  if (packet->GetSize () != 8) {
+    return false;
+  }
   
   uint8_t buffer[8];
   packet->CopyData (buffer, 8);
@@ -677,7 +681,6 @@ NetworkCodingUdpApplication::IsAckPacket (Ptr<Packet> packet)
           buffer[2] == 0xFF && buffer[3] == 0xFF);
 }
 
-// New method: Handle ACK
 void
 NetworkCodingUdpApplication::HandleAck (Ptr<Packet> packet)
 {
@@ -689,34 +692,27 @@ NetworkCodingUdpApplication::HandleAck (Ptr<Packet> packet)
   uint32_t ackedGeneration = (buffer[4] << 24) | (buffer[5] << 16) | 
                             (buffer[6] << 8) | buffer[7];
   
-  NS_LOG_INFO ("Received ACK for generation " << ackedGeneration 
+  NS_LOG_INFO ("Received ACK for DECODED generation " << ackedGeneration 
                << ", current sending generation: " << m_currentGenerationSent);
   
-  if (ackedGeneration == m_currentGenerationSent)
-    {
-      // Current generation was successfully decoded
-      m_waitingForGenerationAck = false;
-      m_retransmissionCount = 0;
-      
-      // Cancel retransmission timer
-      Simulator::Cancel (m_retransmissionTimer);
-      
-      // Check if we have more packets to send
-      uint32_t totalGenerationsNeeded = (m_numPackets + m_generationSize - 1) / m_generationSize;
-      
-      NS_LOG_INFO ("Completed generation " << ackedGeneration 
-                   << ". Need " << totalGenerationsNeeded << " generations total.");
-      
-      if (m_currentGenerationSent + 1 < totalGenerationsNeeded)
-        {
-          MoveToNextGeneration ();
-          ScheduleNext ();
-        }
-      else
-        {
-          NS_LOG_INFO ("All " << totalGenerationsNeeded << " generations sent and acknowledged");
-        }
+  if (ackedGeneration == m_currentGenerationSent) {
+    m_waitingForGenerationAck = false;
+    m_retransmissionCount = 0;
+    
+    Simulator::Cancel (m_retransmissionTimer);
+    
+    uint32_t totalGenerationsNeeded = (m_numPackets + m_generationSize - 1) / m_generationSize;
+    
+    NS_LOG_INFO ("*** GENERATION " << ackedGeneration << " SUCCESSFULLY ACKNOWLEDGED ***");
+    
+    if (m_currentGenerationSent + 1 < totalGenerationsNeeded) {
+      MoveToNextGeneration ();
+      ScheduleNext ();
+    } else {
+      NS_LOG_INFO ("*** ALL " << totalGenerationsNeeded 
+                   << " GENERATIONS SENT AND ACKNOWLEDGED! ***");
     }
+  }
 }
 
 bool
@@ -726,56 +722,25 @@ NetworkCodingUdpApplication::IsCurrentGenerationComplete (void) const
   
   uint32_t totalGenerationsNeeded = (m_numPackets + m_generationSize - 1) / m_generationSize;
   
-  if (m_currentGenerationSent >= totalGenerationsNeeded)
-    {
-      return true; // All generations complete
-    }
+  if (m_currentGenerationSent >= totalGenerationsNeeded) {
+    return true;
+  }
   
-  // For the last generation, it might have fewer packets
   uint32_t packetsNeededInCurrentGeneration = m_generationSize;
-  if (m_currentGenerationSent == totalGenerationsNeeded - 1) // Last generation
-    {
-      uint32_t remainingPackets = m_numPackets - (m_currentGenerationSent * m_generationSize);
-      packetsNeededInCurrentGeneration = remainingPackets;
-    }
+  if (m_currentGenerationSent == totalGenerationsNeeded - 1) {
+    uint32_t remainingPackets = m_numPackets - (m_currentGenerationSent * m_generationSize);
+    packetsNeededInCurrentGeneration = remainingPackets;
+  }
   
   return m_packetsInCurrentGeneration >= packetsNeededInCurrentGeneration;
 }
 
-uint32_t
-NetworkCodingUdpApplication::GetPacketsSent (void) const
-{
-  return m_packetsSent;
-}
-
-uint32_t
-NetworkCodingUdpApplication::GetPacketsReceived (void) const
-{
-  return m_packetsReceived;
-}
-
-uint32_t
-NetworkCodingUdpApplication::GetInnovativePacketsReceived (void) const
-{
-  return m_innovativePacketsReceived;
-}
-
-uint32_t
-NetworkCodingUdpApplication::GetGenerationsDecoded (void) const
-{
-  return m_generationsDecoded;
-}
-
-Ptr<NetworkCodingEncoder>
-NetworkCodingUdpApplication::GetEncoder (void) const
-{
-  return m_encoder;
-}
-
-Ptr<NetworkCodingDecoder>
-NetworkCodingUdpApplication::GetDecoder (void) const
-{
-  return m_decoder;
-}
+// Getter methods
+uint32_t NetworkCodingUdpApplication::GetPacketsSent (void) const { return m_packetsSent; }
+uint32_t NetworkCodingUdpApplication::GetPacketsReceived (void) const { return m_packetsReceived; }
+uint32_t NetworkCodingUdpApplication::GetInnovativePacketsReceived (void) const { return m_innovativePacketsReceived; }
+uint32_t NetworkCodingUdpApplication::GetGenerationsDecoded (void) const { return m_generationsDecoded; }
+Ptr<NetworkCodingEncoder> NetworkCodingUdpApplication::GetEncoder (void) const { return m_encoder; }
+Ptr<NetworkCodingDecoder> NetworkCodingUdpApplication::GetDecoder (void) const { return m_decoder; }
 
 } // namespace ns3

@@ -128,6 +128,7 @@ NetworkCodingEncoder::AddPacket (Ptr<const Packet> packet, uint32_t seqNum)
   return true;
 }
 
+// FIXED: Use proper Galois field arithmetic in GenerateCodedPacket
 Ptr<Packet>
 NetworkCodingEncoder::GenerateCodedPacket (void)
 {
@@ -158,7 +159,7 @@ NetworkCodingEncoder::GenerateCodedPacket (void)
         }
     }
   
-  // Create coded payload by XORing packets with coefficients
+  // FIXED: Create coded payload using PROPER Galois field arithmetic
   std::vector<uint8_t> codedPayload(m_packetSize, 0);
   
   packetIndex = 0;
@@ -167,16 +168,17 @@ NetworkCodingEncoder::GenerateCodedPacket (void)
       if (packetIndex < m_generationSize && coefficients[packetIndex] != 0)
         {
           // Extract packet data
-          uint8_t* buffer = new uint8_t[m_packetSize];
-          pair.second->CopyData(buffer, m_packetSize);
+          std::vector<uint8_t> packetData(m_packetSize);
+          pair.second->CopyData(packetData.data(), m_packetSize);
           
-          // XOR with coefficient (simplified - in real implementation use GF arithmetic)
+          // FIXED: Use proper Galois field operations
+          uint8_t coeff = coefficients[packetIndex];
           for (size_t i = 0; i < m_packetSize; i++)
             {
-              codedPayload[i] ^= (buffer[i] * coefficients[packetIndex]) & 0xFF;
+              // Use Galois field multiplication and addition
+              uint8_t product = m_galoisField->Multiply(coeff, packetData[i]);
+              codedPayload[i] = m_galoisField->Add(codedPayload[i], product);
             }
-          
-          delete[] buffer;
         }
       packetIndex++;
     }

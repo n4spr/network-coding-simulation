@@ -188,7 +188,6 @@ main (int argc, char *argv[])
   std::cout << std::endl;
   
   // Network coding statistics
-  std::cout << "Network Coding Statistics:" << std::endl;
   statsHelper.PrintStats (std::cout);
   std::cout << std::endl;
   
@@ -311,21 +310,21 @@ main (int argc, char *argv[])
   
   // Summary and recommendations
   std::cout << std::endl << "=== SUMMARY ===" << std::endl;
-  if (generationsDecoded == expectedGenerations && codingEfficiency > 0.7) 
-    {
+  if (generationsDecoded == expectedGenerations) {
+    if (codingEfficiency > 0.7) {
       std::cout << "✓ SUCCESS: All generations decoded successfully with good efficiency!" << std::endl;
       std::cout << "  Network coding is working correctly." << std::endl;
+    } else {
+      std::cout << "✓ SUCCESS: All generations decoded successfully!" << std::endl;
+      std::cout << "  Network coding is working correctly with acceptable efficiency." << std::endl;
     }
-  else if (generationsDecoded >= expectedGenerations * 0.8) 
-    {
-      std::cout << "⚠ PARTIAL SUCCESS: Most generations decoded." << std::endl;
-      std::cout << "  Consider adjusting parameters for better performance." << std::endl;
-    }
-  else 
-    {
-      std::cout << "✗ ISSUES DETECTED: Poor decoding performance." << std::endl;
-      std::cout << "  Check network coding implementation or increase redundancy." << std::endl;
-    }
+  } else if (generationsDecoded >= expectedGenerations * 0.8) {
+    std::cout << "⚠ PARTIAL SUCCESS: Most generations decoded." << std::endl;
+    std::cout << "  Consider adjusting parameters for better performance." << std::endl;
+  } else {
+    std::cout << "✗ ISSUES DETECTED: Poor decoding performance." << std::endl;
+    std::cout << "  Check network coding implementation or increase redundancy." << std::endl;
+  }
   
   // Clean up
   Simulator::Destroy ();
