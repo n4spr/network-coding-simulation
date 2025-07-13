@@ -194,6 +194,12 @@ NetworkCodingDecoder::ProcessCodedPacket (Ptr<const Packet> packet)
     paddedCoeffs[i] = coefficients[i];
   }
   
+  // Check if the packet is innovative before storing
+  if (!IsInnovative(paddedCoeffs)) {
+    NS_LOG_INFO("Received non-innovative (redundant) packet.");
+    return false;
+  }
+  
   // Check packet payload size
   if (packetCopy->GetSize () != m_packetSize)
     {
@@ -231,13 +237,13 @@ NetworkCodingDecoder::ProcessCodedPacket (Ptr<const Packet> packet)
           m_codedPayloads[i] = payload;
           stored = true;
           
-          NS_LOG_INFO ("Stored coded packet in row " << i);
+          NS_LOG_INFO ("Stored innovative coded packet in row " << i);
           break;
         }
     }
   
   if (!stored) {
-    NS_LOG_WARN("No empty row available for packet storage");
+    NS_LOG_WARN("No empty row available for packet storage, though it was innovative. This shouldn't happen.");
     return false;
   }
   
@@ -252,6 +258,40 @@ NetworkCodingDecoder::ProcessCodedPacket (Ptr<const Packet> packet)
 }
 
 bool
+NetworkCodingDecoder::IsInnovative(const std::vector<uint8_t>& newCoeffs) const
+{
+    if (m_decoded) return false;
+
+    std::vector<std::vector<uint8_t>> tempMatrix = m_coefficients;
+    
+    // Find an empty row to test the new coefficients
+    int emptyRow = -1;
+    for (size_t i = 0; i < m_generationSize; ++i) {
+        bool rowEmpty = true;
+        for (uint8_t val : tempMatrix[i]) {
+            if (val != 0) {
+                rowEmpty = false;
+                break;
+            }
+        }
+        if (rowEmpty) {
+            emptyRow = i;
+            break;
+        }
+    }
+
+    if (emptyRow == -1) {
+        // Matrix is already full, but not decoded. New packet can't be innovative.
+        return false;
+    }
+
+    tempMatrix[emptyRow] = newCoeffs;
+
+    // Check if rank increases
+    return CalculateRank(tempMatrix) > GetRank();
+}
+
+bool
 NetworkCodingDecoder::CanDecode (void) const
 {
   // Can decode if the coefficient matrix has full rank
@@ -261,14 +301,14 @@ NetworkCodingDecoder::CanDecode (void) const
 uint16_t
 NetworkCodingDecoder::GetRank (void) const
 {
-  return CalculateRank ();
+  return CalculateRank (m_coefficients);
 }
 
 uint16_t
-NetworkCodingDecoder::CalculateRank (void) const
+NetworkCodingDecoder::CalculateRank (const std::vector<std::vector<uint8_t>>& matrix_const) const
 {
   // Copy the coefficient matrix to avoid modifying it
-  std::vector<std::vector<uint8_t>> matrix = m_coefficients;
+  std::vector<std::vector<uint8_t>> matrix = matrix_const;
   
   // Use Gaussian elimination to calculate the rank
   uint16_t rank = 0;

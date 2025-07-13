@@ -135,15 +135,13 @@ private:
 class NetworkCodingControlHeader : public Header
 {
 public:
-  /**
-   * \brief Control packet types
-   */
-  enum ControlType
-  {
-    REQUEST_UNCODED = 1,   //!< Request uncoded packets
-    ACKNOWLEDGE = 2        //!< Acknowledge packets
+  enum ControlType {
+    REQUEST_UNCODED,
+    ACKNOWLEDGE,
+    INNOVATIVE_ACK
   };
 
+  NetworkCodingControlHeader (ControlType type, uint32_t genId);
   /**
    * \brief Get the TypeId
    * \return the TypeId for this class

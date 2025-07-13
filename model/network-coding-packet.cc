@@ -222,6 +222,12 @@ NetworkCodingControlHeader::NetworkCodingControlHeader ()
 {
 }
 
+NetworkCodingControlHeader::NetworkCodingControlHeader (ControlType type, uint32_t genId)
+  : m_controlType (type),
+    m_generationId (genId)
+{
+}
+
 NetworkCodingControlHeader::~NetworkCodingControlHeader ()
 {
 }
@@ -322,7 +328,23 @@ NetworkCodingControlHeader::Deserialize (Buffer::Iterator start)
 void 
 NetworkCodingControlHeader::Print (std::ostream &os) const
 {
-  os << "Control Type: " << (m_controlType == REQUEST_UNCODED ? "REQUEST_UNCODED" : "ACKNOWLEDGE")
+  std::string typeStr;
+  switch (m_controlType) {
+    case REQUEST_UNCODED:
+      typeStr = "REQUEST_UNCODED";
+      break;
+    case ACKNOWLEDGE:
+      typeStr = "ACKNOWLEDGE";
+      break;
+    case INNOVATIVE_ACK:
+      typeStr = "INNOVATIVE_ACK";
+      break;
+    default:
+      typeStr = "UNKNOWN";
+      break;
+  }
+
+  os << "Control Type: " << typeStr
      << " Generation ID: " << m_generationId
      << " Sequence Numbers: [";
   

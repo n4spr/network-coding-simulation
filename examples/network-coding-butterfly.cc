@@ -1,7 +1,6 @@
 /* -*- Mode:C++; c-file-style:"gnu"; indent-tabs-mode:nil; -*- */
 /*
- * Complete Butterfly Topology with Random Linear Network Coding vs TCP/IP Comparison
- * Enhanced version with both RLNC and traditional TCP routing
+ * Complete Butterfly Topology with XOR Network Coding vs TCP/IP Comparison
  */
 
 #include "ns3/core-module.h"
@@ -23,13 +22,13 @@
 
 using namespace ns3;
 
-NS_LOG_COMPONENT_DEFINE ("ButterflyRLNC");
+NS_LOG_COMPONENT_DEFINE ("ButterflyXOR");
 
 // Enhanced simulation parameters
 struct SimulationParameters {
   uint32_t packetSize = 1024;           // Packet size in bytes
   uint16_t generationSize = 2;          // Number of packets per generation
-  uint32_t totalPackets = 2;            // NEW: Total number of packets to send
+  uint32_t totalPackets = 2;            // Total number of packets to send
   double errorRate = 0.0;               // Error rate for all channels (0.0 to 1.0)
   std::string bottleneckDataRate = "1Mbps";  // Data rate for bottleneck link
   std::string normalDataRate = "10Mbps";     // Data rate for normal links
@@ -41,7 +40,7 @@ struct SimulationParameters {
   double bottleneckDelay = 10.0;        // Bottleneck link delay in milliseconds
   uint32_t maxRetransmissions = 3;      // Maximum retransmission attempts
   std::string outputFile = "";          // Output file for statistics
-  bool runComparison = true;            // Run both RLNC and TCP comparison
+  bool runComparison = true;            // Run both XOR and TCP comparison
 };
 
 // Enhanced NetworkStats struct
@@ -52,9 +51,10 @@ struct NetworkStats {
   double totalTime = 0;
   double packetLossRate = 0;
   double averageDelay = 0;
+  double goodput = 0;
   double throughput = 0;
-  uint32_t totalPacketsReceived = 0;    // NEW
-  uint32_t redundantTransmissions = 0;  // NEW
+  uint32_t totalPacketsReceived = 0;
+  uint32_t redundantTransmissions = 0;
   std::string method;
   
   NetworkStats (std::string m) : method (m) {}
@@ -72,30 +72,16 @@ struct NetworkStats {
   }
 };
 
-// Enhanced ButterflyRLNCApp (keeping existing implementation)
-class ButterflyRLNCApp : public Application
+// Enhanced ButterflyXORApp
+class ButterflyXORApp : public Application
 {
 public:
   static TypeId GetTypeId (void)
   {
-    static TypeId tid = TypeId ("ns3::ButterflyRLNCApp")
+    static TypeId tid = TypeId ("ns3::ButterflyXORApp")
       .SetParent<Application> ()
-      .AddConstructor<ButterflyRLNCApp> ();
+      .AddConstructor<ButterflyXORApp> ();
     return tid;
-  }
-
-  ButterflyRLNCApp ()
-    : m_socket (nullptr),
-      m_nodeId (0),
-      m_nodeType (INTERMEDIATE),
-      m_generationSize (2),
-      m_packetSize (1024),
-      m_totalPackets (2),           // NEW: Initialize totalPackets
-      m_packetsSent (0),
-      m_packetsReceived (0),
-      m_running (false)
-  {
-    m_gf = CreateObject<GaloisField> ();
   }
 
   enum NodeType {
@@ -104,15 +90,36 @@ public:
     DESTINATION = 2
   };
 
+  ButterflyXORApp ()
+    : m_socket (nullptr),
+      m_nodeId (0),
+      m_nodeType (INTERMEDIATE),
+      m_generationSize (2),
+      m_packetSize (1024),
+      m_totalPackets (2),
+      m_packetsSent (0),
+      m_packetsReceived (0),
+      m_running (false),
+      m_decoded (false),
+      m_lastForwardedIndex (0),
+      m_port (0),
+      m_innovativeAcksReceived (0),
+      m_retransmissionsSent (0),
+      m_retransmissionTimeout (Seconds(2.0))
+  {
+    m_gf = CreateObject<GaloisField> ();
+  }
+
   void Setup (uint32_t nodeId, NodeType nodeType, uint16_t port, uint32_t packetSize, 
-           uint16_t generationSize, uint32_t totalPackets)
+           uint16_t generationSize, uint32_t totalPackets, Address sourceAddress = Address())
   {
     m_nodeId = nodeId;
     m_nodeType = nodeType;
     m_port = port;
     m_packetSize = packetSize;
     m_generationSize = generationSize;
-    m_totalPackets = totalPackets;  // NOW WORKS - member variable exists
+    m_totalPackets = totalPackets;
+    m_sourceAddress = sourceAddress;
     
     m_encoder = CreateObject<NetworkCodingEncoder> (m_generationSize, m_packetSize);
     m_decoder = CreateObject<NetworkCodingDecoder> (m_generationSize, m_packetSize);
@@ -128,7 +135,7 @@ public:
     if (m_nodeType != SOURCE) return;
 
     std::cout << "[" << Simulator::Now ().GetSeconds () << "s] Source S sending " 
-              << m_totalPackets << " original packets..." << std::endl;  // NOW WORKS
+              << m_totalPackets << " original packets..." << std::endl;
 
     // Send packets based on totalPackets parameter
     for (uint32_t i = 1; i <= m_totalPackets; i++) {
@@ -160,9 +167,56 @@ public:
     return std::vector<Ptr<Packet>> ();
   }
 
-  // ... rest of existing ButterflyRLNCApp implementation remains the same ...
+  std::string GetNodeName () const
+  {
+    switch (m_nodeId) {
+      case 0: return "S";
+      case 1: return "r1";
+      case 2: return "r2";
+      case 3: return "r3";
+      case 4: return "r4";
+      case 5: return "d1";
+      case 6: return "d2";
+      default: return "unknown";
+    }
+  }
 
 private:
+  // Member variables
+  Ptr<Socket> m_socket;
+  uint32_t m_nodeId;
+  NodeType m_nodeType;
+  uint16_t m_generationSize;
+  uint32_t m_packetSize;
+  uint32_t m_totalPackets;
+  uint32_t m_packetsSent;
+  uint32_t m_packetsReceived;
+  bool m_running;
+  bool m_decoded;
+  uint32_t m_lastForwardedIndex;
+  uint16_t m_port;
+  
+  // Retransmission scheme members
+  uint32_t m_innovativeAcksReceived;
+  uint32_t m_retransmissionsSent;
+  EventId m_retransmissionTimer;
+  Time m_retransmissionTimeout;
+  Address m_sourceAddress;
+
+  // Network coding objects
+  Ptr<NetworkCodingEncoder> m_encoder;
+  Ptr<NetworkCodingDecoder> m_decoder;
+  Ptr<GaloisField> m_gf;
+  
+  // Storage for received packets
+  std::vector<std::vector<uint8_t>> m_receivedCoeffs;
+  std::vector<std::vector<uint8_t>> m_receivedPayloads;
+  std::vector<Address> m_destinations;
+
+  // Add member variables to track packets per destination
+  uint32_t m_packetsReceivedDest1 = 0;
+  uint32_t m_packetsReceivedDest2 = 0;
+
   virtual void StartApplication (void)
   {
     m_running = true;
@@ -170,13 +224,15 @@ private:
     m_socket = Socket::CreateSocket (GetNode (), UdpSocketFactory::GetTypeId ());
     
     m_socket->Bind (InetSocketAddress (Ipv4Address::GetAny (), m_port));
-    m_socket->SetRecvCallback (MakeCallback (&ButterflyRLNCApp::HandleRead, this));
+    m_socket->SetRecvCallback (MakeCallback (&ButterflyXORApp::HandleRead, this));
 
     std::cout << "[STARTUP] Node " << GetNodeName() << " (ID=" << m_nodeId 
               << ") started and listening on port " << m_port << std::endl;
 
     if (m_nodeType == SOURCE) {
-      Simulator::Schedule (Seconds (1.0), &ButterflyRLNCApp::SendOriginalPackets, this);
+      Simulator::Schedule (Seconds (1.0), &ButterflyXORApp::SendOriginalPackets, this);
+      // Start retransmission timer at the source
+      m_retransmissionTimer = Simulator::Schedule(m_retransmissionTimeout, &ButterflyXORApp::HandleRetransmissionTimeout, this);
     }
   }
 
@@ -203,16 +259,11 @@ private:
     }
 
     NetworkCodingHeader header;
-    header.SetGenerationId (0);  // FIXED: Always use generation 0 for simple butterfly
+    header.SetGenerationId (0);
     header.SetGenerationSize (m_generationSize);
     
-    // FIXED: Handle coefficients for all packets, not just first generation
     std::vector<uint8_t> coeffs (m_generationSize, 0);
-    
-    // Calculate which generation this packet belongs to
     uint32_t packetIndexInGeneration = (seqNum - 1) % m_generationSize;
-    
-    // Set coefficient for this packet's position in its generation
     coeffs[packetIndexInGeneration] = 1;
     
     header.SetCoefficients (coeffs);
@@ -240,8 +291,20 @@ private:
     while ((packet = socket->RecvFrom (from))) {
       if (!m_running) break;
 
+      // Check for control packet (ACK)
+      if (packet->GetSize() < 10) { // Heuristic to check if it could be a control packet
+          Ptr<Packet> copy = packet->Copy();
+          NetworkCodingControlHeader ctrlHeader;
+          if (copy->PeekHeader(ctrlHeader)) {
+              if (m_nodeType == SOURCE && ctrlHeader.GetControlType() == NetworkCodingControlHeader::INNOVATIVE_ACK) {
+                  HandleInnovativeAck(ctrlHeader);
+              }
+              continue; // Processed as control packet
+          }
+      }
+
       m_packetsReceived++;
-      std::cout << "[RECEIVE] Node " << GetNodeName() << " received packet from " 
+      std::cout << "[RECEIVE] Node " << GetNodeName() << " received data packet from " 
               << from << ", size=" << packet->GetSize() << std::endl;
       
       NetworkCodingHeader header;
@@ -271,120 +334,33 @@ private:
     }
   }
 
-  void HandleIntermediateNode (const std::vector<uint8_t>& coeffs, const std::vector<uint8_t>& payload)
-  {
-    std::string nodeName = GetNodeName ();
-    
-    if (nodeName == "r1") {
-      // Forward every packet immediately
-      SendReceivedPacket (coeffs, payload, InetSocketAddress ("10.1.4.2", m_port));
-      SendReceivedPacket (coeffs, payload, InetSocketAddress ("10.1.3.2", m_port));
-    }
-    else if (nodeName == "r2") {
-      // Forward every packet immediately
-      SendReceivedPacket (coeffs, payload, InetSocketAddress ("10.1.6.2", m_port));
-      SendReceivedPacket (coeffs, payload, InetSocketAddress ("10.1.5.2", m_port));
-    }
-    else if (nodeName == "r3") {
-      // FIXED: Perform network coding when we have enough packets for a generation
-      if (m_receivedPayloads.size () >= m_generationSize) {
-        // Check if we can form a complete generation
-        uint32_t completedGenerations = m_receivedPayloads.size () / m_generationSize;
-        
-        // Perform coding for each complete generation
-        for (uint32_t gen = m_lastForwardedIndex / m_generationSize; 
-             gen < completedGenerations; gen++) {
-          PerformRandomLinearCodingForGeneration (gen);
-        }
-        
-        m_lastForwardedIndex = completedGenerations * m_generationSize;
-      }
-    }
-    else if (nodeName == "r4") {
-      // Forward every received packet
-      for (size_t i = m_lastForwardedIndex; i < m_receivedPayloads.size (); i++) {
-        SendReceivedPacket (m_receivedCoeffs[i], m_receivedPayloads[i], 
-                           InetSocketAddress ("10.1.8.2", m_port));
-        SendReceivedPacket (m_receivedCoeffs[i], m_receivedPayloads[i], 
-                           InetSocketAddress ("10.1.9.2", m_port));
-      }
-      m_lastForwardedIndex = m_receivedPayloads.size ();
-    }
-  }
-
-  // NEW: Network coding for specific generation
-  void PerformRandomLinearCodingForGeneration (uint32_t generationId)
-  {
-    uint32_t startIdx = generationId * m_generationSize;
-    uint32_t endIdx = std::min(startIdx + m_generationSize, 
-                              static_cast<uint32_t>(m_receivedPayloads.size()));
-    
-    if (endIdx - startIdx < m_generationSize) return;
-    
-    std::random_device rd;
-    std::mt19937 gen (rd ());
-    std::uniform_int_distribution<uint8_t> dis (1, 255);
-
-    std::vector<uint8_t> randomCoeffs (m_generationSize);
-    for (size_t i = 0; i < m_generationSize; i++) {
-      randomCoeffs[i] = dis (gen);
-    }
-
-    std::cout << "[" << Simulator::Now ().GetSeconds () << "s] Node r3 performing RLNC for generation " 
-              << generationId << " with coeffs [";
-    for (size_t i = 0; i < randomCoeffs.size (); i++) {
-      std::cout << (int)randomCoeffs[i];
-      if (i < randomCoeffs.size () - 1) std::cout << ",";
-    }
-    std::cout << "] (BOTTLENECK)" << std::endl;
-
-    // Create coded packet using packets from this generation
-    std::vector<uint8_t> codedPayload (m_packetSize, 0);
-    
-    for (uint32_t i = 0; i < m_generationSize; i++) {
-      uint32_t packetIdx = startIdx + i;
-      if (packetIdx < m_receivedPayloads.size () && randomCoeffs[i] != 0) {
-        for (size_t j = 0; j < m_packetSize; j++) {
-          uint8_t product = m_gf->Multiply (randomCoeffs[i], m_receivedPayloads[packetIdx][j]);
-          codedPayload[j] = m_gf->Add (codedPayload[j], product);
-        }
-      }
-    }
-
-    Ptr<Packet> packet = Create<Packet> (codedPayload.data (), m_packetSize);
-    
-    NetworkCodingHeader header;
-    header.SetGenerationId (0);  // FIXED: Use generation 0
-    header.SetGenerationSize (m_generationSize);
-    header.SetCoefficients (randomCoeffs);
-    
-    packet->AddHeader (header);
-
-    int result = m_socket->SendTo (packet, 0, InetSocketAddress ("10.1.7.2", m_port));
-    if (result >= 0) {
-      m_packetsSent++;
-    }
-  }
-
-  // Update HandleDestinationNode to handle multiple generations
   void HandleDestinationNode (const std::vector<uint8_t>& coeffs, const std::vector<uint8_t>& payload)
   {
-    // Create packet with original payload
     Ptr<Packet> packet = Create<Packet> (payload.data (), payload.size ());
     
-    // Create header with correct generation ID and coefficients
     NetworkCodingHeader header;
-    header.SetGenerationId (0);  // FIXED: Use generation 0 for basic butterfly
+    header.SetGenerationId (0);
     header.SetGenerationSize (m_generationSize);
     header.SetCoefficients (coeffs);
     packet->AddHeader (header);
 
     bool innovative = m_decoder->ProcessCodedPacket (packet);
     
+    if (innovative) {
+        SendInnovativeAck();
+    }
+
     std::cout << "[" << Simulator::Now ().GetSeconds () << "s] Destination " << GetNodeName () 
               << " processed packet, innovative: " << (innovative ? "YES" : "NO")
               << ", can decode: " << (m_decoder->CanDecode () ? "YES" : "NO") << std::endl;
 
+    // Determine which destination received the packet and increment counter
+    if (GetNode()->GetId() == 5) {
+      m_packetsReceivedDest1++;
+    } else if (GetNode()->GetId() == 6) {
+      m_packetsReceivedDest2++;
+    }
+    
     if (m_decoder->CanDecode () && !m_decoded) {
       m_decoded = true;
       std::cout << "*** DESTINATION " << GetNodeName () << " SUCCESSFULLY DECODED ALL MESSAGES! ***" << std::endl;
@@ -393,7 +369,157 @@ private:
       for (size_t i = 0; i < decodedPackets.size (); i++) {
         std::cout << "Decoded packet " << (i+1) << " size: " << decodedPackets[i]->GetSize () << std::endl;
       }
+      
+      CheckAndStopSimulation();
     }
+  }
+
+  void SendInnovativeAck()
+  {
+      NS_LOG_INFO("Destination " << GetNodeName() << " sending INNOVATIVE_ACK to source " << m_sourceAddress);
+      NetworkCodingControlHeader header(NetworkCodingControlHeader::INNOVATIVE_ACK, 0);
+      Ptr<Packet> ackPacket = Create<Packet>(0);
+      ackPacket->AddHeader(header);
+      m_socket->SendTo(ackPacket, 0, m_sourceAddress);
+  }
+
+  void HandleInnovativeAck(const NetworkCodingControlHeader& header)
+  {
+      if (m_nodeType != SOURCE) return;
+
+      m_innovativeAcksReceived++;
+      NS_LOG_INFO("Source received INNOVATIVE_ACK. Total ACKs: " << m_innovativeAcksReceived);
+
+      // Reset the retransmission timer since we received useful feedback
+      Simulator::Cancel(m_retransmissionTimer);
+      m_retransmissionTimer = Simulator::Schedule(m_retransmissionTimeout, &ButterflyXORApp::HandleRetransmissionTimeout, this);
+
+      // If we have received enough ACKs (one from each destination for each original packet), we might not need to retransmit.
+      // For the butterfly, 2 packets are sent, and they are XORed. Each destination needs 2 innovative packets to decode.
+      // So we expect 4 innovative ACKs in total.
+      if (m_innovativeAcksReceived >= m_generationSize * 2) {
+          NS_LOG_INFO("All required innovative ACKs received. Stopping retransmission timer.");
+          Simulator::Cancel(m_retransmissionTimer);
+      }
+  }
+
+  void HandleRetransmissionTimeout()
+  {
+      if (m_nodeType != SOURCE || m_retransmissionsSent >= 3) return;
+
+      NS_LOG_INFO("Source timeout. ACKs received: " << m_innovativeAcksReceived << ". Retransmitting...");
+      
+      // Retransmit original packets to the intermediate nodes
+      SendOriginalPackets();
+      m_retransmissionsSent++;
+
+      // Reschedule the timer
+      m_retransmissionTimer = Simulator::Schedule(m_retransmissionTimeout, &ButterflyXORApp::HandleRetransmissionTimeout, this);
+  }
+
+  void CheckAndStopSimulation()
+  {
+    static bool destination1Decoded = false;
+    static bool destination2Decoded = false;
+    
+    if (GetNodeName() == "d1") {
+      destination1Decoded = true;
+    } else if (GetNodeName() == "d2") {
+      destination2Decoded = true;
+    }
+    
+    if (destination1Decoded && destination2Decoded) {
+      std::cout << "\n*** BOTH DESTINATIONS HAVE DECODED - STOPPING SIMULATION ***" << std::endl;
+      Simulator::Stop();
+    }
+  }
+
+  void HandleIntermediateNode (const std::vector<uint8_t>& coeffs, const std::vector<uint8_t>& payload)
+  {
+    std::string nodeName = GetNodeName ();
+    
+    if (nodeName == "r1") {
+      SendReceivedPacket (coeffs, payload, InetSocketAddress ("10.1.4.2", m_port));
+      SendReceivedPacket (coeffs, payload, InetSocketAddress ("10.1.3.2", m_port));
+    }
+    else if (nodeName == "r2") {
+      SendReceivedPacket (coeffs, payload, InetSocketAddress ("10.1.6.2", m_port));
+      SendReceivedPacket (coeffs, payload, InetSocketAddress ("10.1.5.2", m_port));
+    }
+    else if (nodeName == "r3") {
+      SendReceivedPacket (coeffs, payload, InetSocketAddress ("10.1.7.2", m_port));
+    }
+    else if (nodeName == "r4") {
+      // r4 is the bottleneck node that performs XOR coding
+      if (m_receivedPayloads.size() >= m_generationSize) {
+        uint32_t currentCompleteGenerations = m_receivedPayloads.size() / m_generationSize;
+        uint32_t lastProcessedGenerations = m_lastForwardedIndex / m_generationSize;
+        
+        for (uint32_t gen = lastProcessedGenerations; gen < currentCompleteGenerations; gen++) {
+          PerformXORCoding(gen);
+        }
+        
+        m_lastForwardedIndex = currentCompleteGenerations * m_generationSize;
+      }
+    }
+  }
+
+  void PerformXORCoding(uint32_t generationId)
+  {
+    uint32_t startIdx = generationId * m_generationSize;
+    uint32_t endIdx = std::min(startIdx + m_generationSize, 
+                              static_cast<uint32_t>(m_receivedPayloads.size()));
+    
+    if (endIdx - startIdx < m_generationSize) return;
+    
+    std::cout << "[" << Simulator::Now().GetSeconds() << "s] Node r4 performing XOR for generation " 
+              << generationId << " (BOTTLENECK)" << std::endl;
+    
+    // Simple XOR coding: we just XOR all packets together
+    std::vector<uint8_t> xorCoeffs(m_generationSize, 1); // All 1's for XOR coding
+    std::vector<uint8_t> xorPayload(m_packetSize, 0);
+      
+    for (uint32_t i = 0; i < m_generationSize; i++) {
+      uint32_t packetIdx = startIdx + i;
+      if (packetIdx < m_receivedPayloads.size()) {
+        for (size_t j = 0; j < m_packetSize; j++) {
+          xorPayload[j] ^= m_receivedPayloads[packetIdx][j];
+        }
+      }
+    }
+
+    std::cout << "[" << Simulator::Now().GetSeconds() << "s] Node r4 sending XOR coded packet with coeffs [";
+    for (size_t i = 0; i < xorCoeffs.size(); i++) {
+      std::cout << (int)xorCoeffs[i];
+      if (i < xorCoeffs.size() - 1) std::cout << ",";
+    }
+    std::cout << "]" << std::endl;
+
+    SendCodedPacketToBothDestinations(xorCoeffs, xorPayload);
+  }
+
+  void SendCodedPacketToBothDestinations(const std::vector<uint8_t>& coeffs, const std::vector<uint8_t>& payload)
+  {
+    Ptr<Packet> packet1 = Create<Packet>(payload.data(), payload.size());
+    Ptr<Packet> packet2 = Create<Packet>(payload.data(), payload.size());
+    
+    NetworkCodingHeader header1, header2;
+    header1.SetGenerationId(0);
+    header1.SetGenerationSize(m_generationSize);
+    header1.SetCoefficients(coeffs);
+    
+    header2.SetGenerationId(0);
+    header2.SetGenerationSize(m_generationSize);
+    header2.SetCoefficients(coeffs);
+    
+    packet1->AddHeader(header1);
+    packet2->AddHeader(header2);
+
+    int result1 = m_socket->SendTo(packet1, 0, InetSocketAddress("10.1.8.2", m_port));
+    int result2 = m_socket->SendTo(packet2, 0, InetSocketAddress("10.1.9.2", m_port));
+    
+    if (result1 >= 0) m_packetsSent++;
+    if (result2 >= 0) m_packetsSent++;
   }
 
   void SendReceivedPacket (const std::vector<uint8_t>& coeffs, const std::vector<uint8_t>& payload, Address destination)
@@ -401,7 +527,7 @@ private:
     Ptr<Packet> packet = Create<Packet> (payload.data (), payload.size ());
     
     NetworkCodingHeader header;
-    header.SetGenerationId (0);  // FIXED: Use generation 0
+    header.SetGenerationId (0);
     header.SetGenerationSize (m_generationSize);
     header.SetCoefficients (coeffs);
     packet->AddHeader (header);
@@ -411,107 +537,9 @@ private:
       m_packetsSent++;
     }
   }
-
-  void PerformRandomLinearCoding ()
-  {
-    if (m_receivedPayloads.size () < m_generationSize) return;
-    
-    std::random_device rd;
-    std::mt19937 gen (rd ());
-    std::uniform_int_distribution<uint8_t> dis (1, 255);
-
-    std::vector<uint8_t> randomCoeffs (m_generationSize);
-    for (size_t i = 0; i < m_generationSize; i++) {
-      randomCoeffs[i] = dis (gen);
-    }
-
-    std::cout << "[" << Simulator::Now ().GetSeconds () << "s] Node r3 performing RLNC with coeffs [";
-    for (size_t i = 0; i < randomCoeffs.size (); i++) {
-      std::cout << (int)randomCoeffs[i];
-      if (i < randomCoeffs.size () - 1) std::cout << ",";
-    }
-    std::cout << "] (BOTTLENECK)" << std::endl;
-
-    SendCodedPacket (randomCoeffs, InetSocketAddress ("10.1.7.2", m_port));
-  }
-
-  void SendCodedPacket (const std::vector<uint8_t>& coefficients, Address destination)
-  {
-    if (m_receivedPayloads.empty ()) return;
-
-    std::vector<uint8_t> codedPayload (m_packetSize, 0);
-    
-    size_t numPackets = std::min (coefficients.size (), m_receivedPayloads.size ());
-    
-    for (size_t i = 0; i < numPackets; i++) {
-      if (i < m_receivedPayloads.size () && coefficients[i] != 0) {
-        for (size_t j = 0; j < m_packetSize; j++) {
-          uint8_t product = m_gf->Multiply (coefficients[i], m_receivedPayloads[i][j]);
-          codedPayload[j] = m_gf->Add (codedPayload[j], product);
-        }
-      }
-    }
-
-    Ptr<Packet> packet = Create<Packet> (codedPayload.data (), m_packetSize);
-    
-    NetworkCodingHeader header;
-    header.SetGenerationId (0);  // FIXED: Use generation 0
-    header.SetGenerationSize (m_generationSize);
-    header.SetCoefficients (coefficients);
-    
-    packet->AddHeader (header);
-
-    int result = m_socket->SendTo (packet, 0, destination);
-    if (result >= 0) {
-      m_packetsSent++;
-      std::cout << "[" << Simulator::Now ().GetSeconds () << "s] Node " << GetNodeName () 
-                << " sent coded packet with coeffs [";
-      for (size_t i = 0; i < coefficients.size (); i++) {
-        std::cout << (int)coefficients[i];
-        if (i < coefficients.size () - 1) std::cout << ",";
-      }
-      std::cout << "]" << std::endl;
-    }
-  }
-
-  std::string GetNodeName () const
-  {
-    switch (m_nodeId) {
-      case 0: return "S";
-      case 1: return "r1";
-      case 2: return "r2";
-      case 3: return "r3";
-      case 4: return "r4";
-      case 5: return "d1";
-      case 6: return "d2";
-      default: return "unknown";
-    }
-  }
-
-  // Member variables
-  Ptr<Socket> m_socket;
-  uint32_t m_nodeId;
-  NodeType m_nodeType;
-  uint16_t m_port;
-  uint16_t m_generationSize;
-  uint32_t m_packetSize;
-  uint32_t m_totalPackets;          // NEW: Add this member variable
-  uint32_t m_packetsSent;
-  uint32_t m_packetsReceived;
-  bool m_running;
-  bool m_decoded = false;
-  size_t m_lastForwardedIndex = 0;
-
-  std::vector<Address> m_destinations;
-  std::vector<std::vector<uint8_t>> m_receivedCoeffs;
-  std::vector<std::vector<uint8_t>> m_receivedPayloads;
-
-  Ptr<GaloisField> m_gf;
-  Ptr<NetworkCodingEncoder> m_encoder;
-  Ptr<NetworkCodingDecoder> m_decoder;
 };
 
-// FIXED: Traditional TCP application for comparison
+// TCP application for comparison
 class TcpButterflyApp : public Application
 {
 public:
@@ -523,71 +551,68 @@ public:
     return tid;
   }
 
-  TcpButterflyApp ()
-    : m_nodeId (0),
-      m_nodeType (INTERMEDIATE),
-      m_packetSize (1024),
-      m_totalPackets (2),
-      m_packetsSent (0),
-      m_packetsReceived (0),
-      m_running (false),
-      m_receivedBothPackets (false),
-      m_totalBytesReceived (0)
-  {
-  }
-
   enum NodeType {
     SOURCE = 0,
     INTERMEDIATE = 1,
     DESTINATION = 2
   };
 
-  void Setup (uint32_t nodeId, NodeType nodeType, uint16_t port, uint32_t packetSize,  uint32_t totalPackets)
+  TcpButterflyApp ()
+    : m_nodeId (0),
+      m_nodeType (INTERMEDIATE),
+      m_port (0),
+      m_packetSize (1024),
+      m_totalBytesToSend (0),
+      m_packetsSent (0),
+      m_packetsReceived (0),
+      m_running (false),
+      m_receivedBothPackets (false),
+      m_totalBytesReceived (0),
+      m_totalPackets (2)
+  {
+  }
+
+  void Setup (uint32_t nodeId, NodeType nodeType, uint16_t port, uint32_t packetSize, uint32_t totalPackets)
   {
     m_nodeId = nodeId;
     m_nodeType = nodeType;
     m_port = port;
     m_packetSize = packetSize;
     m_totalPackets = totalPackets;
+    m_totalBytesToSend = totalPackets * packetSize;
   }
 
-void SendOriginalPackets ()
-{
+  void SendOriginalPackets ()
+  {
     if (m_nodeType != SOURCE) return;
 
     std::cout << "[TCP] Source S sending packets via multiple paths..." << std::endl;
     
-    // Calculate total bytes to send - EACH destination needs ALL data
-    uint32_t totalBytesToSend = m_totalPackets * m_packetSize;
-    
-    // Send ALL data to EACH destination (not split between them)
-    // Path 1: S -> r1 -> d1 (send all packets)
     ApplicationContainer app1;
     BulkSendHelper bulkSend1 ("ns3::TcpSocketFactory", InetSocketAddress ("10.1.4.2", m_port));
-    bulkSend1.SetAttribute ("MaxBytes", UintegerValue (totalBytesToSend));  // ALL bytes to d1
+    bulkSend1.SetAttribute ("MaxBytes", UintegerValue (m_totalBytesToSend));
     app1 = bulkSend1.Install (GetNode ());
     app1.Start (Seconds (1.0));
     app1.Stop (Seconds (5.0));
     
-    // Path 2: S -> r2 -> d2 (send all packets)
     ApplicationContainer app2;
     BulkSendHelper bulkSend2 ("ns3::TcpSocketFactory", InetSocketAddress ("10.1.6.2", m_port));
-    bulkSend2.SetAttribute ("MaxBytes", UintegerValue (totalBytesToSend));  // ALL bytes to d2
+    bulkSend2.SetAttribute ("MaxBytes", UintegerValue (m_totalBytesToSend));
     app2 = bulkSend2.Install (GetNode ());
     app2.Start (Seconds (1.0));
     app2.Stop (Seconds (5.0));
 
-    // TCP sends duplicate data to each destination
-    m_packetsSent = m_totalPackets * 2; // Count packets sent to both destinations
-    std::cout << "[TCP] Source sending " << totalBytesToSend << " bytes to EACH destination (" 
-              << totalBytesToSend << " bytes x 2 destinations = " << (totalBytesToSend * 2) << " total bytes)" << std::endl;
-}
+    // For statistics, we're sending the same data to both destinations
+    m_packetsSent = m_totalPackets * 2;
+    std::cout << "[TCP] Source sending " << m_totalBytesToSend << " bytes to EACH destination" << std::endl;
+  }
 
   uint32_t GetPacketsSent () const { return m_packetsSent; }
   uint32_t GetPacketsReceived () const { return m_packetsReceived; }
+  uint32_t GetTotalBytesReceived () const { return m_totalBytesReceived; }
+  uint32_t GetTotalBytesToReceive () const { return m_totalBytesToSend; }
   bool HasReceivedBothPackets () const { return m_receivedBothPackets; }
 
-  // MOVED TO PUBLIC: GetNodeName method
   std::string GetNodeName () const
   {
     switch (m_nodeId) {
@@ -603,19 +628,29 @@ void SendOriginalPackets ()
   }
 
 private:
+  uint32_t m_nodeId;
+  NodeType m_nodeType;
+  uint16_t m_port;
+  uint32_t m_packetSize;
+  uint32_t m_totalBytesToSend;
+  uint32_t m_packetsSent;
+  uint32_t m_packetsReceived;
+  bool m_running;
+  bool m_receivedBothPackets;
+  uint32_t m_totalBytesReceived;
+  uint32_t m_totalPackets;
+
   virtual void StartApplication (void)
   {
     m_running = true;
 
     if (m_nodeType == DESTINATION) {
-      // FIXED: Use PacketSink with correct trace callback signature
       PacketSinkHelper sinkHelper ("ns3::TcpSocketFactory", 
                                    InetSocketAddress (Ipv4Address::GetAny (), m_port));
       ApplicationContainer sinkApps = sinkHelper.Install (GetNode ());
       sinkApps.Start (Seconds (0.0));
       sinkApps.Stop (Seconds (10.0));
       
-      // FIXED: Connect trace with correct signature (packet, address)
       Ptr<PacketSink> sink = DynamicCast<PacketSink> (sinkApps.Get (0));
       if (sink) {
         sink->TraceConnectWithoutContext ("Rx", MakeCallback (&TcpButterflyApp::OnPacketReceived, this));
@@ -635,42 +670,45 @@ private:
     m_running = false;
   }
 
-  // FIXED: Correct callback signature for PacketSink::Rx trace
   void OnPacketReceived (Ptr<const Packet> packet, const Address& from)
   {
-      m_packetsReceived++;
-      m_totalBytesReceived += packet->GetSize();
-      
-      // Each destination expects ALL the data (not half)
-      uint32_t expectedBytes = m_totalPackets * m_packetSize;
-      
-      std::cout << "[TCP] Destination " << GetNodeName() << " received packet, size=" 
-                << packet->GetSize() << " from " << from 
-                << " (total: " << m_totalBytesReceived << "/" << expectedBytes << " bytes)" << std::endl;
-      
-      if (m_totalBytesReceived >= expectedBytes) {
-          if (!m_receivedBothPackets) {
-              m_receivedBothPackets = true;
-              std::cout << "*** TCP DESTINATION " << GetNodeName () 
-                        << " RECEIVED COMPLETE DATA! ***" << std::endl;
-          }
+    m_packetsReceived++;
+    m_totalBytesReceived += packet->GetSize();
+    
+    std::cout << "[TCP] Destination " << GetNodeName() << " received packet, size=" 
+              << packet->GetSize() << " from " << from 
+              << " (total: " << m_totalBytesReceived << "/" << m_totalBytesToSend << " bytes)" << std::endl;
+    
+    if (m_totalBytesReceived >= m_totalBytesToSend) {
+      if (!m_receivedBothPackets) {
+        m_receivedBothPackets = true;
+        std::cout << "*** TCP DESTINATION " << GetNodeName () 
+                  << " RECEIVED COMPLETE DATA! ***" << std::endl;
+        
+        CheckTcpAndStopSimulation();
       }
+    }
   }
 
-  // Member variables
-  uint32_t m_nodeId;
-  NodeType m_nodeType;
-  uint16_t m_port;
-  uint32_t m_packetSize;
-  uint32_t m_packetsSent;
-  uint32_t m_packetsReceived;
-  bool m_running;
-  bool m_receivedBothPackets;
-  uint32_t m_totalBytesReceived;
-  uint32_t m_totalPackets;
+  void CheckTcpAndStopSimulation()
+  {
+    static bool tcpDestination1Complete = false;
+    static bool tcpDestination2Complete = false;
+    
+    if (GetNodeName() == "d1") {
+      tcpDestination1Complete = true;
+    } else if (GetNodeName() == "d2") {
+      tcpDestination2Complete = true;
+    }
+    
+    if (tcpDestination1Complete && tcpDestination2Complete) {
+      std::cout << "\n*** BOTH TCP DESTINATIONS HAVE RECEIVED ALL DATA - STOPPING SIMULATION ***" << std::endl;
+      Simulator::Stop();
+    }
+  }
 };
 
-// Updated topology creation function (same as before)
+// Topology creation function
 NodeContainer CreateExactButterflyTopology (const SimulationParameters& params, NetDeviceContainer& devices, Ipv4InterfaceContainer& interfaces)
 {
   std::cout << "\n=== Creating Butterfly Topology (matching diagram) ===" << std::endl;
@@ -777,38 +815,38 @@ NodeContainer CreateExactButterflyTopology (const SimulationParameters& params, 
   return nodes;
 }
 
-// Run RLNC simulation (existing function)
-NetworkStats RunButterflyRLNCSimulation (const SimulationParameters& params)
+// Run XOR Network Coding simulation
+NetworkStats RunButterflyXORSimulation (const SimulationParameters& params)
 {
-  std::cout << "\n=== Running Random Linear Network Coding Simulation ===" << std::endl;
+  std::cout << "\n=== Running XOR Network Coding Simulation ===" << std::endl;
   
-  NetworkStats stats ("Random Linear Network Coding");
+  NetworkStats stats ("XOR Network Coding");
   
   NetDeviceContainer devices;
   Ipv4InterfaceContainer interfaces;
   NodeContainer nodes = CreateExactButterflyTopology (params, devices, interfaces);
   
-  std::vector<Ptr<ButterflyRLNCApp>> apps (7);
+  std::vector<Ptr<ButterflyXORApp>> apps (7);
   
   // Source S
-  apps[0] = CreateObject<ButterflyRLNCApp> ();
-  apps[0]->Setup (0, ButterflyRLNCApp::SOURCE, params.port, params.packetSize, 
-                  params.generationSize, params.totalPackets);  // UPDATED
+  apps[0] = CreateObject<ButterflyXORApp> ();
+  apps[0]->Setup (0, ButterflyXORApp::SOURCE, params.port, params.packetSize, 
+                  params.generationSize, params.totalPackets);
   nodes.Get (0)->AddApplication (apps[0]);
   
   // Intermediate nodes r1, r2, r3, r4
   for (int i = 1; i <= 4; i++) {
-    apps[i] = CreateObject<ButterflyRLNCApp> ();
-    apps[i]->Setup (i, ButterflyRLNCApp::INTERMEDIATE, params.port, params.packetSize, 
-                    params.generationSize, params.totalPackets);  // UPDATED
+    apps[i] = CreateObject<ButterflyXORApp> ();
+    apps[i]->Setup (i, ButterflyXORApp::INTERMEDIATE, params.port, params.packetSize, 
+                    params.generationSize, params.totalPackets);
     nodes.Get (i)->AddApplication (apps[i]);
   }
   
   // Destinations d1, d2
   for (int i = 5; i <= 6; i++) {
-    apps[i] = CreateObject<ButterflyRLNCApp> ();
-    apps[i]->Setup (i, ButterflyRLNCApp::DESTINATION, params.port, params.packetSize, 
-                    params.generationSize, params.totalPackets);  // UPDATED
+    apps[i] = CreateObject<ButterflyXORApp> ();
+    apps[i]->Setup (i, ButterflyXORApp::DESTINATION, params.port, params.packetSize, 
+                    params.generationSize, params.totalPackets, interfaces.GetAddress(0,0)); // Pass source address
     nodes.Get (i)->AddApplication (apps[i]);
   }
 
@@ -820,8 +858,8 @@ NetworkStats RunButterflyRLNCSimulation (const SimulationParameters& params)
   
   if (params.enablePcap) {
     PointToPointHelper p2p;
-    p2p.EnablePcapAll ("butterfly-rlnc");
-    std::cout << "PCAP tracing enabled (files: butterfly-rlnc-*.pcap)" << std::endl;
+    p2p.EnablePcapAll ("butterfly-xor");
+    std::cout << "PCAP tracing enabled (files: butterfly-xor-*.pcap)" << std::endl;
   }
   
   FlowMonitorHelper flowHelper;
@@ -862,7 +900,7 @@ NetworkStats RunButterflyRLNCSimulation (const SimulationParameters& params)
   for (int i = 0; i < 7; i++) {
     stats.totalTransmissions += apps[i]->GetPacketsSent ();
     stats.totalPacketsReceived += apps[i]->GetPacketsReceived ();
-    if (i == 3) { // r3 is bottleneck node
+    if (i == 4) { // r4 is bottleneck node
       stats.bottleneckUsage += apps[i]->GetPacketsSent ();
     }
   }
@@ -874,23 +912,26 @@ NetworkStats RunButterflyRLNCSimulation (const SimulationParameters& params)
     }
   }
   
+  // Calculate packets received by destinations only
+  uint32_t destinationPacketsReceived = apps[5]->GetPacketsReceived() + apps[6]->GetPacketsReceived();
+  
   stats.packetLossRate = totalTxPackets > 0 ? (double)totalLostPackets / totalTxPackets : 0;
   stats.averageDelay = delayCount > 0 ? totalDelay / delayCount : 0;
+  stats.goodput = stats.totalTime > 0 ? (destinationPacketsReceived * params.packetSize * 8) / stats.totalTime : 0;
   stats.throughput = stats.totalTime > 0 ? (totalRxPackets * params.packetSize * 8) / stats.totalTime : 0;
-  
   if (params.verbose) {
     std::cout << "Simulation completed. Flow monitor statistics:" << std::endl;
     std::cout << "  Total TX packets: " << totalTxPackets << std::endl;
     std::cout << "  Total RX packets: " << totalRxPackets << std::endl;
     std::cout << "  Total lost packets: " << totalLostPackets << std::endl;
     std::cout << "  Average delay: " << (stats.averageDelay * 1000) << " ms" << std::endl;
+    std::cout << "  Total transmission time: " << stats.totalTime << std::endl;
   }
   
   Simulator::Destroy ();
   return stats;
 }
-
-// FIXED: Run TCP comparison simulation
+// Run TCP comparison simulation
 NetworkStats RunTcpComparisonSimulation (const SimulationParameters& params)
 {
   std::cout << "\n=== Running TCP/IP Comparison Simulation ===" << std::endl;
@@ -908,7 +949,7 @@ NetworkStats RunTcpComparisonSimulation (const SimulationParameters& params)
   apps[0]->Setup (0, TcpButterflyApp::SOURCE, params.port + 100, params.packetSize, params.totalPackets);
   nodes.Get (0)->AddApplication (apps[0]);
   
-  // Intermediate nodes (no special handling needed for TCP)
+  // Intermediate nodes
   for (int i = 1; i <= 4; i++) {
     apps[i] = CreateObject<TcpButterflyApp> ();
     apps[i]->Setup (i, TcpButterflyApp::INTERMEDIATE, params.port + 100, params.packetSize, params.totalPackets);
@@ -985,25 +1026,39 @@ NetworkStats RunTcpComparisonSimulation (const SimulationParameters& params)
     }
   }
   
-  // TCP uses direct paths, so bottleneck usage should be 0 (bypassed)
   stats.bottleneckUsage = 0;
+  
+  // Calculate actual bytes received by destinations (not using params.packetSize)
+  uint32_t destinationBytesReceived = 0;
+  uint32_t destinationPacketsReceived = 0;
+  
+  for (int i = 5; i <= 6; i++) {
+    destinationBytesReceived += apps[i]->GetTotalBytesReceived();
+    destinationPacketsReceived += apps[i]->GetPacketsReceived();
+  }
   
   stats.packetLossRate = totalTxPackets > 0 ? (double)totalLostPackets / totalTxPackets : 0;
   stats.averageDelay = delayCount > 0 ? totalDelay / delayCount : 0;
-  stats.throughput = stats.totalTime > 0 ? (totalRxPackets * params.packetSize * 8) / stats.totalTime : 0;
   
+  // Use actual bytes received, not estimated packet size
+  stats.goodput = stats.totalTime > 0 ? (destinationBytesReceived * 8) / stats.totalTime : 0;
+  stats.throughput = stats.totalTime > 0 ? (totalRxPackets * (destinationBytesReceived / std::max(1u, destinationPacketsReceived)) * 8) / stats.totalTime : 0;
+
   if (params.verbose) {
     std::cout << "TCP simulation completed. Flow monitor statistics:" << std::endl;
     std::cout << "  Total TX packets: " << totalTxPackets << std::endl;
     std::cout << "  Total RX packets: " << totalRxPackets << std::endl;
     std::cout << "  Total lost packets: " << totalLostPackets << std::endl;
     std::cout << "  Average delay: " << (stats.averageDelay * 1000) << " ms" << std::endl;
+    std::cout << "  Total transmission time: " << stats.totalTime << std::endl;
+    std::cout << "  Destination bytes received: " << destinationBytesReceived << std::endl;
+    std::cout << "  Destination packets received: " << destinationPacketsReceived << std::endl;
+    std::cout << "  Average actual packet size: " << (destinationPacketsReceived > 0 ? destinationBytesReceived / destinationPacketsReceived : 0) << " bytes" << std::endl;
   }
   
   Simulator::Destroy ();
   return stats;
 }
-
 
 void PrintSimulationParameters(const SimulationParameters& params)
 {
@@ -1019,7 +1074,7 @@ void PrintSimulationParameters(const SimulationParameters& params)
   std::cout << std::left << std::setw(25) << "Generation Size" 
             << std::setw(20) << params.generationSize << " packets" << std::endl;
   std::cout << std::left << std::setw(25) << "Total Packets" 
-            << std::setw(20) << params.totalPackets << " packets" << std::endl;  // NEW
+            << std::setw(20) << params.totalPackets << " packets" << std::endl;
   std::cout << std::left << std::setw(25) << "Error Rate" 
             << std::setw(20) << std::fixed << std::setprecision(3) 
             << (params.errorRate * 100) << "%" << std::endl;
@@ -1031,52 +1086,56 @@ void PrintSimulationParameters(const SimulationParameters& params)
             << std::setw(20) << params.simulationTime << " seconds" << std::endl;
 }
 
-// NEW: Enhanced results printing with comparison (OVERLOADED function)
-void PrintResults (const NetworkStats& rlncStats, const NetworkStats& tcpStats)
+void PrintResults (const NetworkStats& xorStats, const NetworkStats& tcpStats)
 {
   std::cout << "\n" << std::string (80, '=') << std::endl;
-  std::cout << "COMPARISON: RLNC vs TRADITIONAL TCP/IP" << std::endl;
+  std::cout << "COMPARISON: XOR NETWORK CODING vs TRADITIONAL TCP/IP" << std::endl;
   std::cout << std::string (80, '=') << std::endl;
   
   std::cout << std::left << std::setw (25) << "Metric" 
-            << std::setw (15) << "RLNC" 
+            << std::setw (15) << "XOR" 
             << std::setw (15) << "TCP/IP" 
-            << std::setw (25) << "RLNC Advantage" << std::endl;
+            << std::setw (25) << "XOR Performance" << std::endl;
   std::cout << std::string (80, '-') << std::endl;
   
   std::cout << std::left << std::setw (25) << "Total Transmissions" 
-            << std::setw (15) << rlncStats.totalTransmissions 
+            << std::setw (15) << xorStats.totalTransmissions 
             << std::setw (15) << tcpStats.totalTransmissions 
-            << std::setw (25) << (tcpStats.totalTransmissions > rlncStats.totalTransmissions ? "Fewer packets" : "More packets") << std::endl;
+            << std::setw (25) << (tcpStats.totalTransmissions > xorStats.totalTransmissions ? "Fewer packets" : "More packets") << std::endl;
   
   std::cout << std::left << std::setw (25) << "Bottleneck Usage" 
-            << std::setw (15) << rlncStats.bottleneckUsage 
+            << std::setw (15) << xorStats.bottleneckUsage 
             << std::setw (15) << tcpStats.bottleneckUsage 
-            << std::setw (25) << (rlncStats.bottleneckUsage > 0 ? "Uses bottleneck" : "Bypasses bottleneck") << std::endl;
+            << std::setw (25) << (xorStats.bottleneckUsage > 0 ? "Uses bottleneck" : "Bypasses bottleneck") << std::endl;
   
   std::cout << std::left << std::setw (25) << "Success Rate" 
-            << std::setw (15) << std::fixed << std::setprecision (1) << (rlncStats.GetSuccessRate() * 100) << "%" 
+            << std::setw (15) << std::fixed << std::setprecision (1) << (xorStats.GetSuccessRate() * 100) << "%" 
             << std::setw (15) << std::fixed << std::setprecision (1) << (tcpStats.GetSuccessRate() * 100) << "%" 
-            << std::setw (25) << (rlncStats.GetSuccessRate() >= tcpStats.GetSuccessRate() ? "Equal/Better" : "Worse") << std::endl;
+            << std::setw (25) << (xorStats.GetSuccessRate() >= tcpStats.GetSuccessRate() ? "Equal/Better" : "Worse") << std::endl;
   
   std::cout << std::left << std::setw (25) << "Avg Delay (ms)" 
-            << std::setw (15) << std::fixed << std::setprecision (2) << (rlncStats.averageDelay * 1000) 
+            << std::setw (15) << std::fixed << std::setprecision (2) << (xorStats.averageDelay * 1000) 
             << std::setw (15) << std::fixed << std::setprecision (2) << (tcpStats.averageDelay * 1000) 
-            << std::setw (25) << (rlncStats.averageDelay < tcpStats.averageDelay ? "Lower delay" : "Higher delay") << std::endl;
+            << std::setw (25) << (xorStats.averageDelay < tcpStats.averageDelay ? "Lower delay" : "Higher delay") << std::endl;
   
   std::cout << std::left << std::setw (25) << "Throughput (bps)" 
-            << std::setw (15) << std::fixed << std::setprecision (0) << rlncStats.throughput 
+            << std::setw (15) << std::fixed << std::setprecision (0) << xorStats.throughput 
             << std::setw (15) << std::fixed << std::setprecision (0) << tcpStats.throughput 
-            << std::setw (25) << (rlncStats.throughput > tcpStats.throughput ? "Higher" : "Lower") << std::endl;
+            << std::setw (25) << (xorStats.throughput > tcpStats.throughput ? "Higher" : "Lower") << std::endl;
 
+  std::cout << std::left << std::setw (25) << "Goodput (bps)" 
+            << std::setw (15) << std::fixed << std::setprecision (0) << xorStats.goodput 
+            << std::setw (15) << std::fixed << std::setprecision (0) << tcpStats.goodput 
+            << std::setw (25) << (xorStats.goodput > tcpStats.goodput ? "Higher" : "Lower") << std::endl;
+  
   std::cout << "\n" << std::string (80, '=') << std::endl;
   std::cout << "ANALYSIS SUMMARY" << std::endl;
   std::cout << std::string (80, '=') << std::endl;
   
-  if (rlncStats.GetSuccessRate() >= tcpStats.GetSuccessRate()) {
-    std::cout << " RLNC: Successfully delivered data to both destinations" << std::endl;
+  if (xorStats.GetSuccessRate() >= tcpStats.GetSuccessRate()) {
+    std::cout << " XOR: Successfully delivered data to both destinations" << std::endl;
     std::cout << " Network Coding Advantage: Can utilize bottleneck link efficiently" << std::endl;
-    std::cout << " RLNC uses " << rlncStats.bottleneckUsage << " coded transmissions through bottleneck" << std::endl;
+    std::cout << " XOR uses " << xorStats.bottleneckUsage << " coded transmissions through bottleneck" << std::endl;
   }
   
   if (tcpStats.bottleneckUsage == 0) {
@@ -1084,8 +1143,8 @@ void PrintResults (const NetworkStats& rlncStats, const NetworkStats& tcpStats)
     std::cout << " TCP: Cannot benefit from network coding - treats bottleneck as unusable" << std::endl;
   }
   
-  if (rlncStats.totalTransmissions <= tcpStats.totalTransmissions) {
-    std::cout << " RLNC: More efficient - " << (tcpStats.totalTransmissions - rlncStats.totalTransmissions) 
+  if (xorStats.totalTransmissions <= tcpStats.totalTransmissions) {
+    std::cout << " XOR: More efficient - " << (tcpStats.totalTransmissions - xorStats.totalTransmissions) 
               << " fewer transmissions needed" << std::endl;
   }
   
@@ -1093,7 +1152,6 @@ void PrintResults (const NetworkStats& rlncStats, const NetworkStats& tcpStats)
   std::cout << "   that traditional routing would avoid!" << std::endl;
 }
 
-// Keep the existing single PrintResults function as-is
 void PrintResults (const NetworkStats& stats)
 {
   std::cout << "\n" << std::string (80, '=') << std::endl;
@@ -1129,25 +1187,22 @@ void PrintResults (const NetworkStats& stats)
 
 int main (int argc, char *argv[])
 {
-  // Simulation parameters with defaults
   SimulationParameters params;
   
-  // ENHANCED: Command line argument parsing
   CommandLine cmd (__FILE__);
   cmd.AddValue ("packetSize", "Size of packets in bytes", params.packetSize);
   cmd.AddValue ("generationSize", "Number of packets per generation", params.generationSize);
-  cmd.AddValue ("totalPackets", "Total number of packets to send", params.totalPackets);  // NEW
+  cmd.AddValue ("totalPackets", "Total number of packets to send", params.totalPackets);
   cmd.AddValue ("errorRate", "Error rate for all channels (0.0 to 1.0)", params.errorRate);
   cmd.AddValue ("bottleneckDataRate", "Data rate for bottleneck link", params.bottleneckDataRate);
   cmd.AddValue ("normalDataRate", "Data rate for normal links", params.normalDataRate);
   cmd.AddValue ("simulationTime", "Total simulation time in seconds", params.simulationTime);
   cmd.AddValue ("verbose", "Enable verbose logging", params.verbose);
   cmd.AddValue ("enablePcap", "Enable PCAP tracing", params.enablePcap);
-  cmd.AddValue ("runComparison", "Run both RLNC and TCP comparison", params.runComparison);
+  cmd.AddValue ("runComparison", "Run both XOR and TCP comparison", params.runComparison);
   
   cmd.Parse (argc, argv);
   
-  // VALIDATION: Ensure totalPackets >= generationSize
   if (params.totalPackets < params.generationSize) {
     std::cout << "WARNING: totalPackets (" << params.totalPackets 
               << ") is less than generationSize (" << params.generationSize 
@@ -1155,29 +1210,24 @@ int main (int argc, char *argv[])
     params.totalPackets = params.generationSize;
   }
   
-  // Enable logging based on verbosity
   if (params.verbose) {
-    LogComponentEnable ("ButterflyRLNC", LOG_LEVEL_INFO);
+    LogComponentEnable ("ButterflyXOR", LOG_LEVEL_INFO);
   }
   
-  std::cout << "Butterfly Topology: Random Linear Network Coding vs TCP/IP Comparison" << std::endl;
+  std::cout << "Butterfly Topology: XOR Network Coding vs TCP/IP Comparison" << std::endl;
   std::cout << "====================================================================" << std::endl;
   
-  // Print simulation parameters
   PrintSimulationParameters(params);
   
   if (params.runComparison) {
-    // Run both simulations for comparison
-    NetworkStats rlncResults = RunButterflyRLNCSimulation (params);
+    NetworkStats xorResults = RunButterflyXORSimulation (params);
     NetworkStats tcpResults = RunTcpComparisonSimulation (params);
-    
-    // Print comparison results
-    PrintResults (rlncResults, tcpResults);
+    PrintResults (xorResults, tcpResults);
   } else {
-    // Run only RLNC simulation
-    NetworkStats results = RunButterflyRLNCSimulation (params);
+    NetworkStats results = RunButterflyXORSimulation (params);
     PrintResults (results);
   }
   
   return 0;
-}
+
+} // namespace ns3

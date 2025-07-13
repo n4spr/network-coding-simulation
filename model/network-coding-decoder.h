@@ -23,10 +23,9 @@
 
 #include "ns3/object.h"
 #include "ns3/packet.h"
-#include "galois-field.h"
 #include "network-coding-packet.h"
+#include "galois-field.h"
 #include <vector>
-#include <map>
 #include <set>
 
 namespace ns3 {
@@ -89,65 +88,29 @@ public:
    */
   uint16_t GetPacketSize (void) const;
 
-  /**
-   * \brief Process a received coded packet
-   * \param packet The packet to process
-   * \return true if packet was helpful in decoding, false otherwise
-   */
   bool ProcessCodedPacket (Ptr<const Packet> packet);
-
-  /**
-   * \brief Check if the current generation can be decoded
-   * \return true if decoding is possible, false otherwise
-   */
   bool CanDecode (void) const;
-
-  /**
-   * \brief Get the rank of the decoding matrix
-   * \return the matrix rank
-   */
   uint16_t GetRank (void) const;
-
-  /**
-   * \brief Get the decoded packets if decoding was successful
-   * \return vector of decoded packets
-   */
+  
   std::vector<Ptr<Packet>> GetDecodedPackets (void);
-
-  /**
-   * \brief Get the sequence numbers of missing packets
-   * \return set of sequence numbers
-   */
   std::set<uint32_t> GetMissingPackets (void) const;
 
-  /**
-   * \brief Move to next generation
-   */
   void NextGeneration (void);
-  
-  /**
-   * \brief Get the current generation ID
-   * \return the current generation ID
-   */
   uint32_t GetCurrentGenerationId (void) const;
 
 private:
-  /**
-   * \brief Decode the current generation using Gaussian elimination
-   */
   void DecodeGeneration (void);
-  
-  /**
-   * \brief Calculate the rank of the coefficient matrix
-   * \return the matrix rank
-   */
-  uint16_t CalculateRank (void) const;
+  uint16_t CalculateRank (const std::vector<std::vector<uint8_t>>& matrix) const;
+  bool IsInnovative(const std::vector<uint8_t>& newCoeffs) const;
 
-  Ptr<GaloisField> m_gf;                   //!< Galois field for coding operations
-  uint16_t m_generationSize;               //!< Number of packets in a generation
-  uint16_t m_packetSize;                   //!< Size of packets in bytes
+  uint16_t m_generationSize;
+  uint16_t m_packetSize;
   uint32_t m_currentGeneration;            //!< Current generation ID
+  bool m_decoded;
+
+  std::set<uint32_t> m_receivedSequences;
   
+  Ptr<GaloisField> m_gf;
   /**
    * \brief Coefficient matrix (row-major order)
    */
@@ -159,19 +122,9 @@ private:
   std::vector<std::vector<uint8_t>> m_codedPayloads;
   
   /**
-   * \brief Set of received sequence numbers
-   */
-  std::set<uint32_t> m_receivedSequences;
-  
-  /**
    * \brief Vector of decoded packets
    */
   std::vector<Ptr<Packet>> m_decodedPackets;
-  
-  /**
-   * \brief Flag indicating if decoding has been performed
-   */
-  bool m_decoded;
 };
 
 } // namespace ns3
