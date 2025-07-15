@@ -39,7 +39,8 @@ struct SimulationParameters {
   double linkDelay = 1.0;               // Link delay in milliseconds
   double bottleneckDelay = 10.0;        // Bottleneck link delay in milliseconds
   uint32_t maxRetransmissions = 3;      // Maximum retransmission attempts
-  std::string outputFile = "";          // Output file for statistics
+  std::string outputFile = "outfile";          // Output file for statistics
+  std::string csvFile = "results.csv";             // CSV file for results
   bool runComparison = true;            // Run both XOR and TCP comparison
 };
 
@@ -447,10 +448,7 @@ private:
       SendReceivedPacket (coeffs, payload, InetSocketAddress ("10.1.5.2", m_port));
     }
     else if (nodeName == "r3") {
-      SendReceivedPacket (coeffs, payload, InetSocketAddress ("10.1.7.2", m_port));
-    }
-    else if (nodeName == "r4") {
-      // r4 is the bottleneck node that performs XOR coding
+      // r3 is the bottleneck node that performs XOR coding
       if (m_receivedPayloads.size() >= m_generationSize) {
         uint32_t currentCompleteGenerations = m_receivedPayloads.size() / m_generationSize;
         uint32_t lastProcessedGenerations = m_lastForwardedIndex / m_generationSize;
@@ -462,6 +460,11 @@ private:
         m_lastForwardedIndex = currentCompleteGenerations * m_generationSize;
       }
     }
+    else if (nodeName == "r4") {
+      // r4 now just forwards the coded packet from r3 to the destinations
+      SendReceivedPacket (coeffs, payload, InetSocketAddress ("10.1.8.2", m_port)); // Forward to d1
+      SendReceivedPacket (coeffs, payload, InetSocketAddress ("10.1.9.2", m_port)); // Forward to d2
+    }
   }
 
   void PerformXORCoding(uint32_t generationId)
@@ -472,7 +475,7 @@ private:
     
     if (endIdx - startIdx < m_generationSize) return;
     
-    std::cout << "[" << Simulator::Now().GetSeconds() << "s] Node r4 performing XOR for generation " 
+    std::cout << "[" << Simulator::Now().GetSeconds() << "s] Node r3 performing XOR for generation " 
               << generationId << " (BOTTLENECK)" << std::endl;
     
     // Simple XOR coding: we just XOR all packets together
@@ -488,14 +491,15 @@ private:
       }
     }
 
-    std::cout << "[" << Simulator::Now().GetSeconds() << "s] Node r4 sending XOR coded packet with coeffs [";
+    std::cout << "[" << Simulator::Now().GetSeconds() << "s] Node r3 sending XOR coded packet with coeffs [";
     for (size_t i = 0; i < xorCoeffs.size(); i++) {
       std::cout << (int)xorCoeffs[i];
       if (i < xorCoeffs.size() - 1) std::cout << ",";
     }
     std::cout << "]" << std::endl;
 
-    SendCodedPacketToBothDestinations(xorCoeffs, xorPayload);
+    // Send the single coded packet to r4, which will then forward it
+    SendReceivedPacket(xorCoeffs, xorPayload, InetSocketAddress("10.1.7.2", m_port));
   }
 
   void SendCodedPacketToBothDestinations(const std::vector<uint8_t>& coeffs, const std::vector<uint8_t>& payload)
@@ -900,7 +904,7 @@ NetworkStats RunButterflyXORSimulation (const SimulationParameters& params)
   for (int i = 0; i < 7; i++) {
     stats.totalTransmissions += apps[i]->GetPacketsSent ();
     stats.totalPacketsReceived += apps[i]->GetPacketsReceived ();
-    if (i == 4) { // r4 is bottleneck node
+    if (i == 3) { // r3 is bottleneck node
       stats.bottleneckUsage += apps[i]->GetPacketsSent ();
     }
   }
@@ -1152,6 +1156,56 @@ void PrintResults (const NetworkStats& xorStats, const NetworkStats& tcpStats)
   std::cout << "   that traditional routing would avoid!" << std::endl;
 }
 
+void WriteToCsv(const std::string& filename, const SimulationParameters& params, const NetworkStats& xorStats, const NetworkStats& tcpStats)
+{
+    if (filename.empty()) {
+        return;
+    }
+
+    std::ofstream outFile;
+    bool fileExists = std::ifstream(filename).good();
+
+    outFile.open(filename, std::ios_base::app);
+    if (!outFile.is_open()) {
+        std::cerr << "Error: Could not open CSV file: " << filename << std::endl;
+        return;
+    }
+
+    // Write header only if the file is new/empty
+    if (!fileExists) {
+        outFile << "packetSize,genSize,numPackets,errorRate,normalDataRate,bottleneckDataRate,"
+                << "tcpTransmissionTime,xorTransmissionTime,tcpTxPackets,xorTxPackets,"
+                << "tcpBottleneckUsage,xorBottleneckUsage,tcpSuccessRate,xorSuccessRate,"
+                << "tcpAvgDelay,xorAvgDelay,tcpThroughput,xorThroughput,tcpGoodput,xorGoodput\n";
+    }
+
+    // Write data row
+    outFile << params.packetSize << ","
+            << params.generationSize << ","
+            << params.totalPackets << ","
+            << params.errorRate << ","
+            << params.normalDataRate << ","
+            << params.bottleneckDataRate << ","
+            << tcpStats.totalTime << ","
+            << xorStats.totalTime << ","
+            << tcpStats.totalTransmissions << ","
+            << xorStats.totalTransmissions << ","
+            << tcpStats.bottleneckUsage << ","
+            << xorStats.bottleneckUsage << ","
+            << tcpStats.GetSuccessRate() << ","
+            << xorStats.GetSuccessRate() << ","
+            << tcpStats.averageDelay << ","
+            << xorStats.averageDelay << ","
+            << tcpStats.throughput << ","
+            << xorStats.throughput << ","
+            << tcpStats.goodput << ","
+            << xorStats.goodput << "\n";
+
+    outFile.close();
+    std::cout << "\nResults appended to " << filename << std::endl;
+}
+
+
 void PrintResults (const NetworkStats& stats)
 {
   std::cout << "\n" << std::string (80, '=') << std::endl;
@@ -1200,6 +1254,7 @@ int main (int argc, char *argv[])
   cmd.AddValue ("verbose", "Enable verbose logging", params.verbose);
   cmd.AddValue ("enablePcap", "Enable PCAP tracing", params.enablePcap);
   cmd.AddValue ("runComparison", "Run both XOR and TCP comparison", params.runComparison);
+  cmd.AddValue ("csvFile", "CSV file to append results to", params.csvFile);
   
   cmd.Parse (argc, argv);
   
@@ -1223,11 +1278,11 @@ int main (int argc, char *argv[])
     NetworkStats xorResults = RunButterflyXORSimulation (params);
     NetworkStats tcpResults = RunTcpComparisonSimulation (params);
     PrintResults (xorResults, tcpResults);
+    WriteToCsv(params.csvFile, params, xorResults, tcpResults);
   } else {
     NetworkStats results = RunButterflyXORSimulation (params);
     PrintResults (results);
   }
   
   return 0;
-
-} // namespace ns3
+}
