@@ -22,8 +22,8 @@
 #define NETWORK_CODING_PACKET_H
 
 #include "ns3/header.h"
-#include "ns3/buffer.h"
 #include <vector>
+#include <set>
 
 namespace ns3 {
 
@@ -46,12 +46,6 @@ public:
   static TypeId GetTypeId (void);
   
   /**
-   * \brief Get the instance TypeId
-   * \return the instance TypeId
-   */
-  virtual TypeId GetInstanceTypeId (void) const;
-
-  /**
    * \brief Default constructor
    */
   NetworkCodingHeader ();
@@ -60,6 +54,37 @@ public:
    * \brief Destructor
    */
   virtual ~NetworkCodingHeader ();
+
+  /**
+   * \brief Get the instance TypeId
+   * \return the instance TypeId
+   */
+  virtual TypeId GetInstanceTypeId (void) const override;
+
+  /**
+   * \brief Get the serialized size
+   * \return the size in bytes
+   */
+  virtual uint32_t GetSerializedSize (void) const override;
+
+  /**
+   * \brief Serialize the header
+   * \param start the buffer iterator to start serialization
+   */
+  virtual void Serialize (Buffer::Iterator start) const override;
+
+  /**
+   * \brief Deserialize the header
+   * \param start the buffer iterator to start deserialization
+   * \return the number of bytes deserialized
+   */
+  virtual uint32_t Deserialize (Buffer::Iterator start) override;
+  
+  /**
+   * \brief Print the header contents
+   * \param os the output stream to print to
+   */
+  virtual void Print (std::ostream &os) const override;
 
   /**
    * \brief Set the generation ID
@@ -90,42 +115,16 @@ public:
    * \param coeffs the coding coefficients to set
    */
   void SetCoefficients (const std::vector<uint8_t>& coeffs);
-  
-  /**
-   * \brief Get the coding coefficients
-   * \return the coding coefficients
-   */
   const std::vector<uint8_t>& GetCoefficients (void) const;
 
-  /**
-   * \brief Get the size of this header
-   * \return the size in bytes
-   */
-  virtual uint32_t GetSerializedSize (void) const;
-  
-  /**
-   * \brief Serialize the header to a buffer
-   * \param start the buffer to serialize to
-   */
-  virtual void Serialize (Buffer::Iterator start) const;
-  
-  /**
-   * \brief Deserialize the header from a buffer
-   * \param start the buffer to deserialize from
-   * \return the number of bytes consumed
-   */
-  virtual uint32_t Deserialize (Buffer::Iterator start);
-  
-  /**
-   * \brief Print the header contents
-   * \param os the output stream to print to
-   */
-  virtual void Print (std::ostream &os) const;
+  void SetHopSequence(uint64_t seq);
+  uint64_t GetHopSequence() const;
 
 private:
-  uint32_t m_generationId;                 //!< Generation ID
-  uint16_t m_generationSize;               //!< Generation size
-  std::vector<uint8_t> m_coefficients;     //!< Coding coefficients
+  uint32_t m_generationId;
+  uint16_t m_generationSize;
+  std::vector<uint8_t> m_coefficients;
+  uint64_t m_hopSequence; // Unique ID for hop-by-hop retransmissions
 };
 
 /**
@@ -138,7 +137,8 @@ public:
   enum ControlType {
     REQUEST_UNCODED,
     ACKNOWLEDGE,
-    INNOVATIVE_ACK
+    INNOVATIVE_ACK,
+    HOP_ACK // New type for hop-by-hop acknowledgment
   };
 
   NetworkCodingControlHeader (ControlType type, uint32_t genId);
@@ -149,12 +149,6 @@ public:
   static TypeId GetTypeId (void);
   
   /**
-   * \brief Get the instance TypeId
-   * \return the instance TypeId
-   */
-  virtual TypeId GetInstanceTypeId (void) const;
-
-  /**
    * \brief Default constructor
    */
   NetworkCodingControlHeader ();
@@ -163,6 +157,37 @@ public:
    * \brief Destructor
    */
   virtual ~NetworkCodingControlHeader ();
+
+  /**
+   * \brief Get the instance TypeId
+   * \return the instance TypeId
+   */
+  virtual TypeId GetInstanceTypeId (void) const override;
+
+  /**
+   * \brief Get the serialized size
+   * \return the size in bytes
+   */
+  virtual uint32_t GetSerializedSize (void) const override;
+
+  /**
+   * \brief Serialize the header
+   * \param start the buffer iterator to start serialization
+   */
+  virtual void Serialize (Buffer::Iterator start) const override;
+
+  /**
+   * \brief Deserialize the header
+   * \param start the buffer iterator to start deserialization
+   * \return the number of bytes deserialized
+   */
+  virtual uint32_t Deserialize (Buffer::Iterator start) override;
+
+  /**
+   * \brief Print the header contents
+   * \param os the output stream to print to
+   */
+  virtual void Print (std::ostream &os) const override;
 
   /**
    * \brief Set the control packet type
@@ -193,42 +218,16 @@ public:
    * \param seqNums the packet sequence numbers to set
    */
   void SetSequenceNumbers (const std::vector<uint32_t>& seqNums);
-  
-  /**
-   * \brief Get the packet sequence numbers
-   * \return the packet sequence numbers
-   */
   const std::vector<uint32_t>& GetSequenceNumbers (void) const;
-
-  /**
-   * \brief Get the size of this header
-   * \return the size in bytes
-   */
-  virtual uint32_t GetSerializedSize (void) const;
   
-  /**
-   * \brief Serialize the header to a buffer
-   * \param start the buffer to serialize to
-   */
-  virtual void Serialize (Buffer::Iterator start) const;
-  
-  /**
-   * \brief Deserialize the header from a buffer
-   * \param start the buffer to deserialize from
-   * \return the number of bytes consumed
-   */
-  virtual uint32_t Deserialize (Buffer::Iterator start);
-  
-  /**
-   * \brief Print the header contents
-   * \param os the output stream to print to
-   */
-  virtual void Print (std::ostream &os) const;
+  void SetHopAckSequence(uint64_t seq);
+  uint64_t GetHopAckSequence() const;
 
 private:
-  ControlType m_controlType;               //!< Control packet type
-  uint32_t m_generationId;                 //!< Generation ID
-  std::vector<uint32_t> m_sequenceNumbers; //!< Packet sequence numbers
+  ControlType m_controlType;
+  uint32_t m_generationId;
+  std::vector<uint32_t> m_sequenceNumbers;
+  uint64_t m_hopAckSequence; // Sequence number for HOP_ACK
 };
 
 } // namespace ns3

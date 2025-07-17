@@ -50,7 +50,8 @@ NetworkCodingHeader::GetInstanceTypeId (void) const
 
 NetworkCodingHeader::NetworkCodingHeader ()
   : m_generationId (0),
-    m_generationSize (0)
+    m_generationSize (0),
+    m_hopSequence(0)
 {
 }
 
@@ -95,10 +96,25 @@ NetworkCodingHeader::GetCoefficients (void) const
 }
 
 void 
+NetworkCodingHeader::SetHopSequence(uint64_t seq)
+{
+  m_hopSequence = seq;
+}
+
+uint64_t 
+NetworkCodingHeader::GetHopSequence() const
+{
+  return m_hopSequence;
+}
+
+void 
 NetworkCodingHeader::Serialize (Buffer::Iterator start) const
 {
   NS_LOG_FUNCTION (this);
   
+  // Write hop sequence (8 bytes)
+  start.WriteHtonU64(m_hopSequence);
+
   // Write generation ID (4 bytes)
   start.WriteHtonU32 (m_generationId);
   
@@ -127,6 +143,9 @@ NetworkCodingHeader::Deserialize (Buffer::Iterator start)
 {
   NS_LOG_FUNCTION (this);
   
+  // Read hop sequence
+  m_hopSequence = start.ReadNtohU64();
+
   // Read generation ID
   m_generationId = start.ReadNtohU32 ();
   
@@ -172,14 +191,16 @@ NetworkCodingHeader::Deserialize (Buffer::Iterator start)
 uint32_t 
 NetworkCodingHeader::GetSerializedSize (void) const
 {
-  // 4 bytes (generation ID) + 2 bytes (generation size) + 2 bytes (coeff count) + coefficients
-  return 8 + m_generationSize;  // Fixed size calculation
+  // 8 (hop) + 4 (genId) + 2 (genSize) + 2 (numCoeffs) + N (coeffs)
+  // The number of coefficients written is always equal to the generation size due to padding.
+  return 8 + 4 + 2 + 2 + m_generationSize;
 }
 
 void 
 NetworkCodingHeader::Print (std::ostream &os) const
 {
-  os << "Generation ID: " << m_generationId
+  os << "HopSeq: " << m_hopSequence
+     << " Generation ID: " << m_generationId
      << " Generation Size: " << m_generationSize
      << " Coefficients: [";
   
@@ -218,13 +239,15 @@ NetworkCodingControlHeader::GetInstanceTypeId (void) const
 
 NetworkCodingControlHeader::NetworkCodingControlHeader ()
   : m_controlType (REQUEST_UNCODED),
-    m_generationId (0)
+    m_generationId (0),
+    m_hopAckSequence(0)
 {
 }
 
 NetworkCodingControlHeader::NetworkCodingControlHeader (ControlType type, uint32_t genId)
   : m_controlType (type),
-    m_generationId (genId)
+    m_generationId (genId),
+    m_hopAckSequence(0)
 {
 }
 
@@ -268,11 +291,23 @@ NetworkCodingControlHeader::GetSequenceNumbers (void) const
   return m_sequenceNumbers;
 }
 
+void 
+NetworkCodingControlHeader::SetHopAckSequence(uint64_t seq)
+{
+  m_hopAckSequence = seq;
+}
+
+uint64_t 
+NetworkCodingControlHeader::GetHopAckSequence() const
+{
+  return m_hopAckSequence;
+}
+
 uint32_t 
 NetworkCodingControlHeader::GetSerializedSize (void) const
 {
-  // Control Type + Generation ID + Number of sequence numbers + Sequence numbers
-  return sizeof (uint8_t) + sizeof (uint32_t) + sizeof (uint16_t) + m_sequenceNumbers.size () * sizeof (uint32_t);
+  // Control Type + Generation ID + Hop Ack Seq + Num Seq Nums + Seq Nums
+  return sizeof (uint8_t) + sizeof (uint32_t) + sizeof(uint64_t) + sizeof (uint16_t) + m_sequenceNumbers.size () * sizeof (uint32_t);
 }
 
 void 
@@ -283,6 +318,9 @@ NetworkCodingControlHeader::Serialize (Buffer::Iterator start) const
   
   // Write generation ID
   start.WriteHtonU32 (m_generationId);
+
+  // Write hop ack sequence
+  start.WriteHtonU64 (m_hopAckSequence);
   
   // Write number of sequence numbers
   start.WriteHtonU16 (static_cast<uint16_t> (m_sequenceNumbers.size ()));
@@ -302,6 +340,9 @@ NetworkCodingControlHeader::Deserialize (Buffer::Iterator start)
   
   // Read generation ID
   m_generationId = start.ReadNtohU32 ();
+
+  // Read hop ack sequence
+  m_hopAckSequence = start.ReadNtohU64();
   
   // Read number of sequence numbers
   uint16_t numSeqNums = start.ReadNtohU16 ();
@@ -339,25 +380,26 @@ NetworkCodingControlHeader::Print (std::ostream &os) const
     case INNOVATIVE_ACK:
       typeStr = "INNOVATIVE_ACK";
       break;
+    case HOP_ACK:
+      typeStr = "HOP_ACK";
+      break;
     default:
       typeStr = "UNKNOWN";
       break;
   }
 
-  os << "Control Type: " << typeStr
-     << " Generation ID: " << m_generationId
-     << " Sequence Numbers: [";
-  
-  for (size_t i = 0; i < m_sequenceNumbers.size (); i++)
-    {
-      os << m_sequenceNumbers[i];
-      if (i < m_sequenceNumbers.size () - 1)
-        {
-          os << ", ";
-        }
+  os << "Control Type: " << typeStr;
+  if (m_controlType == HOP_ACK) {
+    os << " HopAckSeq: " << m_hopAckSequence;
+  } else {
+    os << " Generation ID: " << m_generationId
+       << " Sequence Numbers: [";
+    
+    for (auto it = m_sequenceNumbers.begin(); it != m_sequenceNumbers.end(); ++it) {
+      os << *it << (std::next(it) == m_sequenceNumbers.end() ? "" : ",");
     }
-  
-  os << "]";
+    os << "]";
+  }
 }
 
 } // namespace ns3

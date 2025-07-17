@@ -24,7 +24,6 @@ using namespace ns3;
 
 NS_LOG_COMPONENT_DEFINE ("ButterflyXOR");
 
-// Enhanced simulation parameters
 struct SimulationParameters {
   uint32_t packetSize = 1024;           // Packet size in bytes
   uint16_t generationSize = 2;          // Number of packets per generation
@@ -44,7 +43,6 @@ struct SimulationParameters {
   bool runComparison = true;            // Run both XOR and TCP comparison
 };
 
-// Enhanced NetworkStats struct
 struct NetworkStats {
   uint32_t totalTransmissions = 0;
   uint32_t bottleneckUsage = 0;
@@ -73,7 +71,7 @@ struct NetworkStats {
   }
 };
 
-// Enhanced ButterflyXORApp
+// Enhanced ButterflyXORApp with Hop-by-Hop Reliability
 class ButterflyXORApp : public Application
 {
 public:
@@ -104,15 +102,14 @@ public:
       m_decoded (false),
       m_lastForwardedIndex (0),
       m_port (0),
-      m_innovativeAcksReceived (0),
-      m_retransmissionsSent (0),
-      m_retransmissionTimeout (Seconds(2.0))
+      m_retransmissionTimeout (Seconds(0.5)), // Timeout for hop-by-hop ACKs
+      m_hopSeqCounter (0)
   {
     m_gf = CreateObject<GaloisField> ();
   }
 
   void Setup (uint32_t nodeId, NodeType nodeType, uint16_t port, uint32_t packetSize, 
-           uint16_t generationSize, uint32_t totalPackets, Address sourceAddress = Address())
+           uint16_t generationSize, uint32_t totalPackets)
   {
     m_nodeId = nodeId;
     m_nodeType = nodeType;
@@ -120,7 +117,6 @@ public:
     m_packetSize = packetSize;
     m_generationSize = generationSize;
     m_totalPackets = totalPackets;
-    m_sourceAddress = sourceAddress;
     
     m_encoder = CreateObject<NetworkCodingEncoder> (m_generationSize, m_packetSize);
     m_decoder = CreateObject<NetworkCodingDecoder> (m_generationSize, m_packetSize);
@@ -140,18 +136,27 @@ public:
 
     // Send packets based on totalPackets parameter
     for (uint32_t i = 1; i <= m_totalPackets; i++) {
+      // Create the packet and its header
+      std::vector<uint8_t> data(m_packetSize, (uint8_t)i);
+      Ptr<Packet> packet = Create<Packet>(data.data(), m_packetSize);
+      m_encoder->AddPacket(packet, i);
+
+      NetworkCodingHeader header;
+      header.SetGenerationId(0);
+      header.SetGenerationSize(m_generationSize);
+      std::vector<uint8_t> coeffs(m_generationSize, 0);
+      coeffs[(i - 1) % m_generationSize] = 1;
+      header.SetCoefficients(coeffs);
+
+      Address destination;
       if (i == 1) {
-        SendPacket (i, InetSocketAddress ("10.1.1.2", m_port));  // To r1
-      } else if (i == 2) {
-        SendPacket (i, InetSocketAddress ("10.1.2.2", m_port));  // To r2
-      } else {
-        // For additional packets, alternate between r1 and r2
-        if (i % 2 == 1) {
-          SendPacket (i, InetSocketAddress ("10.1.1.2", m_port));  // To r1
-        } else {
-          SendPacket (i, InetSocketAddress ("10.1.2.2", m_port));  // To r2
-        }
+        destination = InetSocketAddress ("10.1.1.2", m_port);  // To r1
+      } else { // i == 2 or other
+        destination = InetSocketAddress ("10.1.2.2", m_port);  // To r2
       }
+      
+      // Use the correct sending function with hop-by-hop reliability
+      SendWithHopAck(packet, header, destination);
     }
 
     std::cout << "Source sent " << m_totalPackets << " packets to intermediate nodes" << std::endl;
@@ -159,6 +164,7 @@ public:
 
   uint32_t GetPacketsSent () const { return m_packetsSent; }
   uint32_t GetPacketsReceived () const { return m_packetsReceived; }
+  bool IsDecoded() const { return m_decoded; }
   
   std::vector<Ptr<Packet>> GetDecodedPackets ()
   {
@@ -197,12 +203,12 @@ private:
   uint32_t m_lastForwardedIndex;
   uint16_t m_port;
   
-  // Retransmission scheme members
-  uint32_t m_innovativeAcksReceived;
-  uint32_t m_retransmissionsSent;
-  EventId m_retransmissionTimer;
+  // Hop-by-Hop Retransmission scheme members
   Time m_retransmissionTimeout;
-  Address m_sourceAddress;
+  uint64_t m_hopSeqCounter;
+  std::map<uint64_t, Ptr<Packet>> m_unackedPackets;
+  std::map<uint64_t, EventId> m_retransmissionTimers;
+  std::map<uint64_t, Address> m_unackedDestinations;
 
   // Network coding objects
   Ptr<NetworkCodingEncoder> m_encoder;
@@ -232,8 +238,6 @@ private:
 
     if (m_nodeType == SOURCE) {
       Simulator::Schedule (Seconds (1.0), &ButterflyXORApp::SendOriginalPackets, this);
-      // Start retransmission timer at the source
-      m_retransmissionTimer = Simulator::Schedule(m_retransmissionTimeout, &ButterflyXORApp::HandleRetransmissionTimeout, this);
     }
   }
 
@@ -243,6 +247,13 @@ private:
     if (m_socket) {
       m_socket->Close ();
     }
+    // Cancel all pending retransmission timers
+    for(auto const& [key, val] : m_retransmissionTimers) {
+        Simulator::Cancel(val);
+    }
+    m_retransmissionTimers.clear();
+    m_unackedPackets.clear();
+    m_unackedDestinations.clear();
   }
 
   void SendPacket (uint32_t seqNum, Address destination)
@@ -292,35 +303,31 @@ private:
     while ((packet = socket->RecvFrom (from))) {
       if (!m_running) break;
 
-      // Check for control packet (ACK)
-      if (packet->GetSize() < 10) { // Heuristic to check if it could be a control packet
-          Ptr<Packet> copy = packet->Copy();
-          NetworkCodingControlHeader ctrlHeader;
-          if (copy->PeekHeader(ctrlHeader)) {
-              if (m_nodeType == SOURCE && ctrlHeader.GetControlType() == NetworkCodingControlHeader::INNOVATIVE_ACK) {
-                  HandleInnovativeAck(ctrlHeader);
-              }
-              continue; // Processed as control packet
+      // Correctly check for control packet (HOP_ACK) first
+      Ptr<Packet> copy = packet->Copy();
+      NetworkCodingControlHeader ctrlHeader;
+      if (copy->PeekHeader(ctrlHeader) > 0) {
+          if (ctrlHeader.GetControlType() == NetworkCodingControlHeader::HOP_ACK) {
+              HandleHopAck(ctrlHeader.GetHopAckSequence());
           }
+          continue; // This was a control packet, so we are done with it.
       }
 
+      // If it's not a control packet, it must be a data packet.
       m_packetsReceived++;
-      std::cout << "[RECEIVE] Node " << GetNodeName() << " received data packet from " 
-              << from << ", size=" << packet->GetSize() << std::endl;
       
       NetworkCodingHeader header;
       packet->RemoveHeader (header);
+      uint64_t hopSeq = header.GetHopSequence();
+
+      // Send Hop-ACK immediately back to the sender
+      SendHopAck(hopSeq, from);
+
+      std::cout << "[" << Simulator::Now ().GetSeconds () << "s] Node " << GetNodeName () 
+                << " received data (hopSeq=" << hopSeq << "), sent HOP_ACK to " << from << std::endl;
 
       const std::vector<uint8_t>& coeffs = header.GetCoefficients ();
       
-      std::cout << "[" << Simulator::Now ().GetSeconds () << "s] Node " << GetNodeName () 
-                << " received packet with coeffs [";
-      for (size_t i = 0; i < coeffs.size (); i++) {
-        std::cout << (int)coeffs[i];
-        if (i < coeffs.size () - 1) std::cout << ",";
-      }
-      std::cout << "]" << std::endl;
-
       std::vector<uint8_t> payload (packet->GetSize ());
       packet->CopyData (payload.data (), packet->GetSize ());
       
@@ -328,7 +335,8 @@ private:
       m_receivedPayloads.push_back (payload);
 
       if (m_nodeType == INTERMEDIATE) {
-        HandleIntermediateNode (coeffs, payload);
+        // Pass only the most recently received packet's info
+        HandleIntermediateNode ();
       } else if (m_nodeType == DESTINATION) {
         HandleDestinationNode (coeffs, payload);
       }
@@ -338,7 +346,7 @@ private:
   void HandleDestinationNode (const std::vector<uint8_t>& coeffs, const std::vector<uint8_t>& payload)
   {
     Ptr<Packet> packet = Create<Packet> (payload.data (), payload.size ());
-    
+
     NetworkCodingHeader header;
     header.SetGenerationId (0);
     header.SetGenerationSize (m_generationSize);
@@ -348,12 +356,12 @@ private:
     bool innovative = m_decoder->ProcessCodedPacket (packet);
     
     if (innovative) {
-        SendInnovativeAck();
+        // This logic is for end-to-end ACKs, which we are replacing.
+        // The hop-by-hop ACK is sent in HandleRead.
     }
 
     std::cout << "[" << Simulator::Now ().GetSeconds () << "s] Destination " << GetNodeName () 
-              << " processed packet, innovative: " << (innovative ? "YES" : "NO")
-              << ", can decode: " << (m_decoder->CanDecode () ? "YES" : "NO") << std::endl;
+              << " processed packet, innovative: " << (innovative ? "YES" : "NO") << std::endl;
 
     // Determine which destination received the packet and increment counter
     if (GetNode()->GetId() == 5) {
@@ -375,47 +383,42 @@ private:
     }
   }
 
-  void SendInnovativeAck()
+  void SendHopAck(uint64_t hopSeq, Address destination)
   {
-      NS_LOG_INFO("Destination " << GetNodeName() << " sending INNOVATIVE_ACK to source " << m_sourceAddress);
-      NetworkCodingControlHeader header(NetworkCodingControlHeader::INNOVATIVE_ACK, 0);
+      NetworkCodingControlHeader header(NetworkCodingControlHeader::HOP_ACK, 0);
+      header.SetHopAckSequence(hopSeq);
       Ptr<Packet> ackPacket = Create<Packet>(0);
       ackPacket->AddHeader(header);
-      m_socket->SendTo(ackPacket, 0, m_sourceAddress);
+      m_socket->SendTo(ackPacket, 0, destination);
   }
 
-  void HandleInnovativeAck(const NetworkCodingControlHeader& header)
+  void HandleHopAck(uint64_t hopSeq)
   {
-      if (m_nodeType != SOURCE) return;
-
-      m_innovativeAcksReceived++;
-      NS_LOG_INFO("Source received INNOVATIVE_ACK. Total ACKs: " << m_innovativeAcksReceived);
-
-      // Reset the retransmission timer since we received useful feedback
-      Simulator::Cancel(m_retransmissionTimer);
-      m_retransmissionTimer = Simulator::Schedule(m_retransmissionTimeout, &ButterflyXORApp::HandleRetransmissionTimeout, this);
-
-      // If we have received enough ACKs (one from each destination for each original packet), we might not need to retransmit.
-      // For the butterfly, 2 packets are sent, and they are XORed. Each destination needs 2 innovative packets to decode.
-      // So we expect 4 innovative ACKs in total.
-      if (m_innovativeAcksReceived >= m_generationSize * 2) {
-          NS_LOG_INFO("All required innovative ACKs received. Stopping retransmission timer.");
-          Simulator::Cancel(m_retransmissionTimer);
+      if (m_unackedPackets.count(hopSeq)) {
+          std::cout << "[" << Simulator::Now().GetSeconds() << "s] Node " << GetNodeName() 
+                    << " received HOP_ACK for hopSeq=" << hopSeq << std::endl;
+          Simulator::Cancel(m_retransmissionTimers[hopSeq]);
+          m_unackedPackets.erase(hopSeq);
+          m_retransmissionTimers.erase(hopSeq);
+          m_unackedDestinations.erase(hopSeq);
       }
   }
 
-  void HandleRetransmissionTimeout()
+  void HandleRetransmissionTimeout(uint64_t hopSeq)
   {
-      if (m_nodeType != SOURCE || m_retransmissionsSent >= 3) return;
+      if (m_unackedPackets.count(hopSeq)) {
+          Ptr<Packet> packetToResend = m_unackedPackets[hopSeq]->Copy();
+          Address destination = m_unackedDestinations[hopSeq];
+          
+          std::cout << "[" << Simulator::Now().GetSeconds() << "s] Node " << GetNodeName() 
+                    << " TIMEOUT for hopSeq=" << hopSeq << ". Retransmitting to " << destination << std::endl;
+          
+          m_socket->SendTo(packetToResend, 0, destination);
+          m_packetsSent++; // Count retransmissions
 
-      NS_LOG_INFO("Source timeout. ACKs received: " << m_innovativeAcksReceived << ". Retransmitting...");
-      
-      // Retransmit original packets to the intermediate nodes
-      SendOriginalPackets();
-      m_retransmissionsSent++;
-
-      // Reschedule the timer
-      m_retransmissionTimer = Simulator::Schedule(m_retransmissionTimeout, &ButterflyXORApp::HandleRetransmissionTimeout, this);
+          // Reschedule the timer
+          m_retransmissionTimers[hopSeq] = Simulator::Schedule(m_retransmissionTimeout, &ButterflyXORApp::HandleRetransmissionTimeout, this, hopSeq);
+      }
   }
 
   void CheckAndStopSimulation()
@@ -435,17 +438,21 @@ private:
     }
   }
 
-  void HandleIntermediateNode (const std::vector<uint8_t>& coeffs, const std::vector<uint8_t>& payload)
+  void HandleIntermediateNode ()
   {
     std::string nodeName = GetNodeName ();
     
+    // Get the most recently received packet's data for forwarding
+    const auto& lastCoeffs = m_receivedCoeffs.back();
+    const auto& lastPayload = m_receivedPayloads.back();
+    
     if (nodeName == "r1") {
-      SendReceivedPacket (coeffs, payload, InetSocketAddress ("10.1.4.2", m_port));
-      SendReceivedPacket (coeffs, payload, InetSocketAddress ("10.1.3.2", m_port));
+      SendReceivedPacket (lastCoeffs, lastPayload, InetSocketAddress ("10.1.4.2", m_port)); // to d1
+      SendReceivedPacket (lastCoeffs, lastPayload, InetSocketAddress ("10.1.3.2", m_port)); // to r3
     }
     else if (nodeName == "r2") {
-      SendReceivedPacket (coeffs, payload, InetSocketAddress ("10.1.6.2", m_port));
-      SendReceivedPacket (coeffs, payload, InetSocketAddress ("10.1.5.2", m_port));
+      SendReceivedPacket (lastCoeffs, lastPayload, InetSocketAddress ("10.1.6.2", m_port)); // to d2
+      SendReceivedPacket (lastCoeffs, lastPayload, InetSocketAddress ("10.1.5.2", m_port)); // to r3
     }
     else if (nodeName == "r3") {
       // r3 is the bottleneck node that performs XOR coding
@@ -462,8 +469,8 @@ private:
     }
     else if (nodeName == "r4") {
       // r4 now just forwards the coded packet from r3 to the destinations
-      SendReceivedPacket (coeffs, payload, InetSocketAddress ("10.1.8.2", m_port)); // Forward to d1
-      SendReceivedPacket (coeffs, payload, InetSocketAddress ("10.1.9.2", m_port)); // Forward to d2
+      SendReceivedPacket (lastCoeffs, lastPayload, InetSocketAddress ("10.1.8.2", m_port)); // Forward to d1
+      SendReceivedPacket (lastCoeffs, lastPayload, InetSocketAddress ("10.1.9.2", m_port)); // Forward to d2
     }
   }
 
@@ -516,14 +523,8 @@ private:
     header2.SetGenerationSize(m_generationSize);
     header2.SetCoefficients(coeffs);
     
-    packet1->AddHeader(header1);
-    packet2->AddHeader(header2);
-
-    int result1 = m_socket->SendTo(packet1, 0, InetSocketAddress("10.1.8.2", m_port));
-    int result2 = m_socket->SendTo(packet2, 0, InetSocketAddress("10.1.9.2", m_port));
-    
-    if (result1 >= 0) m_packetsSent++;
-    if (result2 >= 0) m_packetsSent++;
+    SendWithHopAck(packet1, header1, InetSocketAddress("10.1.8.2", m_port));
+    SendWithHopAck(packet2, header2, InetSocketAddress("10.1.9.2", m_port));
   }
 
   void SendReceivedPacket (const std::vector<uint8_t>& coeffs, const std::vector<uint8_t>& payload, Address destination)
@@ -534,11 +535,23 @@ private:
     header.SetGenerationId (0);
     header.SetGenerationSize (m_generationSize);
     header.SetCoefficients (coeffs);
+    
+    SendWithHopAck(packet, header, destination);
+  }
+
+  void SendWithHopAck(Ptr<Packet> packet, NetworkCodingHeader& header, Address destination)
+  {
+    uint64_t hopSeq = ++m_hopSeqCounter;
+    header.SetHopSequence(hopSeq);
     packet->AddHeader (header);
 
-    int result = m_socket->SendTo (packet, 0, destination);
-    if (result >= 0) {
+    if (m_socket->SendTo (packet->Copy(), 0, destination) >= 0) {
       m_packetsSent++;
+      
+      // Store for potential retransmission
+      m_unackedPackets[hopSeq] = packet;
+      m_unackedDestinations[hopSeq] = destination;
+      m_retransmissionTimers[hopSeq] = Simulator::Schedule(m_retransmissionTimeout, &ButterflyXORApp::HandleRetransmissionTimeout, this, hopSeq);
     }
   }
 };
@@ -850,7 +863,7 @@ NetworkStats RunButterflyXORSimulation (const SimulationParameters& params)
   for (int i = 5; i <= 6; i++) {
     apps[i] = CreateObject<ButterflyXORApp> ();
     apps[i]->Setup (i, ButterflyXORApp::DESTINATION, params.port, params.packetSize, 
-                    params.generationSize, params.totalPackets, interfaces.GetAddress(0,0)); // Pass source address
+                    params.generationSize, params.totalPackets); // Pass source address <-- REMOVED extra argument here
     nodes.Get (i)->AddApplication (apps[i]);
   }
 
