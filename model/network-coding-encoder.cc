@@ -1,7 +1,6 @@
 #include "network-coding-encoder.h"
 #include "ns3/log.h"
 #include "galois-field.h"
-#include <random>
 
 namespace ns3 {
 
@@ -26,6 +25,7 @@ NetworkCodingEncoder::NetworkCodingEncoder ()
     m_galoisField (CreateObject<GaloisField>())
 {
   NS_LOG_FUNCTION (this);
+  m_coefficientsRng = CreateObject<UniformRandomVariable>();
 }
 
 NetworkCodingEncoder::NetworkCodingEncoder (uint16_t generationSize, uint16_t packetSize)
@@ -35,6 +35,7 @@ NetworkCodingEncoder::NetworkCodingEncoder (uint16_t generationSize, uint16_t pa
 {
   NS_LOG_FUNCTION (this << generationSize << packetSize);
   m_galoisField = CreateObject<GaloisField>();
+  m_coefficientsRng = CreateObject<UniformRandomVariable>();
 }
 
 NetworkCodingEncoder::~NetworkCodingEncoder ()
@@ -141,24 +142,37 @@ NetworkCodingEncoder::GenerateCodedPacket (void)
       return nullptr;
     }
   
-  // Generate random coefficients
-  std::random_device rd;
-  std::mt19937 gen(rd());
-  std::uniform_int_distribution<uint8_t> dis(1, 255); // Avoid zero coefficients
-  
   std::vector<uint8_t> coefficients(m_generationSize, 0);
-  
-  // Set coefficients for packets we actually have
-  size_t packetIndex = 0;
-  for (auto& pair : m_generationPackets)
+  for (size_t i = 0; i < m_generationPackets.size(); ++i)
     {
-      if (packetIndex < m_generationSize)
-        {
-          coefficients[packetIndex] = dis(gen);
-          packetIndex++;
-        }
+      coefficients[i] = m_coefficientsRng->GetInteger(1, 255);
     }
-  
+  return GenerateCodedPacket(coefficients);
+}
+
+int64_t
+NetworkCodingEncoder::AssignStreams(int64_t stream)
+{
+  m_coefficientsRng->SetStream(stream);
+  return 1;
+}
+
+Ptr<Packet>
+NetworkCodingEncoder::GenerateCodedPacket(const std::vector<uint8_t>& coefficients)
+{
+  if (m_generationPackets.empty() || coefficients.size() != m_generationSize)
+    {
+      return nullptr;
+    }
+  bool nonzero = false;
+  for (size_t i = 0; i < coefficients.size(); ++i)
+    {
+      if (i >= m_generationPackets.size() && coefficients[i] != 0) return nullptr;
+      nonzero |= coefficients[i] != 0;
+    }
+  if (!nonzero) return nullptr;
+  size_t packetIndex = 0;
+
   // FIXED: Create coded payload using PROPER Galois field arithmetic
   std::vector<uint8_t> codedPayload(m_packetSize, 0);
   

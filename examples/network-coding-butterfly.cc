@@ -924,8 +924,18 @@ NetworkStats RunButterflyXORSimulation (const SimulationParameters& params)
   
   for (int i = 5; i <= 6; i++) {
     auto decodedPackets = apps[i]->GetDecodedPackets ();
-    if (decodedPackets.size () >= params.generationSize) {
+    bool verified = decodedPackets.size() == params.generationSize;
+    for (size_t original = 0; original < decodedPackets.size(); ++original) {
+      if (decodedPackets[original]->GetSize() != params.packetSize) { verified = false; break; }
+      std::vector<uint8_t> payload(params.packetSize);
+      decodedPackets[original]->CopyData(payload.data(), payload.size());
+      for (uint8_t byte : payload) {
+        if (byte != static_cast<uint8_t>(original + 1)) { verified = false; break; }
+      }
+    }
+    if (verified) {
       stats.successfulDecodings++;
+      std::cout << "[VALIDATION] Fixed NC original payload bytes verified at destination " << i << std::endl;
     }
   }
   

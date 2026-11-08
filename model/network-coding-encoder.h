@@ -3,6 +3,7 @@
 
 #include "ns3/object.h"
 #include "ns3/packet.h"
+#include "ns3/random-variable-stream.h"
 #include "network-coding-packet.h" 
 #include "galois-field.h"
 #include <map>
@@ -27,6 +28,9 @@ public:
 
   bool AddPacket (Ptr<const Packet> packet, uint32_t seqNum);
   Ptr<Packet> GenerateCodedPacket (void);
+  // Explicit coefficients support reproducible coding schedules and validation.
+  Ptr<Packet> GenerateCodedPacket (const std::vector<uint8_t>& coefficients);
+  int64_t AssignStreams (int64_t stream);
   Ptr<Packet> GenerateUncodedPacket (uint32_t seqNum);
 
   bool IsGenerationComplete (void) const;
@@ -42,6 +46,7 @@ private:
   
   std::map<uint32_t, Ptr<Packet>> m_generationPackets;
   Ptr<GaloisField> m_galoisField;
+  Ptr<UniformRandomVariable> m_coefficientsRng;
 };
 
 } // namespace ns3

@@ -133,6 +133,7 @@ struct SimulationParameters {
     uint32_t minNodes = 5;
     uint32_t maxNodes = 50;
     double edgeProbability = 0.3;
+    std::string topology = "random";
     uint32_t packetSize = 1024;
     uint16_t generationSize = 2;
     uint32_t totalPackets = 2;
@@ -241,9 +242,9 @@ private:
     {
         m_butterflies.clear();
         
-        auto neighborhood = BuildTwoHopNeighborhood();
+        auto neighborhood = BuildThreeHopNeighborhood();
         std::cout << "  Butterfly Detection: analyzing " << neighborhood.size() 
-                  << " nodes reachable within 2 hops of Node " << m_nodeId << std::endl;
+                  << " nodes reachable within 3 hops of Node " << m_nodeId << std::endl;
 
         if (neighborhood.size() < 7) {
             std::cout << "  Neighborhood too small for butterfly patterns (need ≥7 vertices, have "
@@ -272,7 +273,7 @@ private:
                     continue;  // Undirected graph - only add once
                 }
                 if (neighborhood.count(neighborId) == 0) {
-                    continue;  // Limit to 2-hop neighborhood
+                    continue;  // Limit to 3-hop neighborhood
                 }
 
                 boost::add_edge(nodeToVertex[nodeId], nodeToVertex[neighborId], networkGraph);
@@ -280,11 +281,11 @@ private:
             }
         }
 
-        std::cout << "  Built 2-hop subgraph with " << boost::num_vertices(networkGraph)
+        std::cout << "  Built 3-hop subgraph with " << boost::num_vertices(networkGraph)
                   << " vertices and " << edgesAdded << " edges" << std::endl;
 
-        if (boost::num_edges(networkGraph) < 8) {
-            std::cout << "  Neighborhood too sparse for butterfly patterns (need ≥8 edges, have "
+        if (boost::num_edges(networkGraph) < 9) {
+            std::cout << "  Neighborhood too sparse for butterfly patterns (need ≥9 edges, have "
                       << boost::num_edges(networkGraph) << ")" << std::endl;
             return;
         }
@@ -407,12 +408,12 @@ private:
                     // Create butterfly info
                     ButterflyInfo butterfly;
                     butterfly.source = s;
-                    butterfly.r1 = canonicalR12.first;
-                    butterfly.r2 = canonicalR12.second; 
+                    butterfly.r1 = r1;
+                    butterfly.r2 = r2;
                     butterfly.r3 = r3;
                     butterfly.r4 = r4;
-                    butterfly.d1 = canonicalD12.first;
-                    butterfly.d2 = canonicalD12.second;
+                    butterfly.d1 = d1;
+                    butterfly.d2 = d2;
                     
                     m_butterflies.push_back(butterfly);
                     
@@ -558,20 +559,14 @@ private:
             }
         }
         
-        // Get topology set for 2-hop information
+        // TC provides advertised topology edges beyond the local HELLO neighborhood.
         const olsr::TopologySet& topology = olsrRouting->GetTopologySet();
         
         for (const auto& topoEntry : topology) {
             Ipv4Address lastAddr = topoEntry.lastAddr;
             Ipv4Address destAddr = topoEntry.destAddr;
             
-            // Only include if within 2-hop distance from current node
-            bool lastAddrIn2Hop = (lastAddr == myAddress) || 
-                                  oneHopNeighbors[myAddress].count(lastAddr) > 0;
-            bool destAddrIn2Hop = (destAddr == myAddress) || 
-                                  oneHopNeighbors[myAddress].count(destAddr) > 0;
-            
-            if (lastAddrIn2Hop || destAddrIn2Hop) {
+            {
                 uint32_t lastNodeId = GetNodeIdFromAddress(lastAddr);
                 uint32_t destNodeId = GetNodeIdFromAddress(destAddr);
                 if (lastNodeId == std::numeric_limits<uint32_t>::max() ||
@@ -588,6 +583,19 @@ private:
             }
         }
         
+        // HELLO supplies actual 2-hop neighbor edges, not the entire physical graph.
+        for (const auto& entry : olsrRouting->GetTwoHopNeighbors()) {
+            auto first = entry.neighborMainAddr;
+            auto second = entry.twoHopNeighborAddr;
+            uint32_t firstId = GetNodeIdFromAddress(first);
+            uint32_t secondId = GetNodeIdFromAddress(second);
+            if (firstId == kInvalidNodeId || secondId == kInvalidNodeId) continue;
+            addressToNodeId[first] = firstId;
+            addressToNodeId[second] = secondId;
+            oneHopNeighbors[first].insert(second);
+            oneHopNeighbors[second].insert(first);
+        }
+
         // Convert to node ID based neighbor map
         for (const auto& [addr, neighAddrs] : oneHopNeighbors) {
             if (addressToNodeId.count(addr)) {
@@ -620,7 +628,7 @@ private:
         return ResolveNodeIdFromIpv4(addr);
     }
 
-    std::set<uint32_t> BuildTwoHopNeighborhood() const
+    std::set<uint32_t> BuildThreeHopNeighborhood() const
     {
         std::set<uint32_t> neighborhood;
         if (m_neighbors.count(m_nodeId) == 0) {
@@ -642,7 +650,7 @@ private:
             uint32_t depth = current.second;
             neighborhood.insert(nodeId);
 
-            if (depth >= 2) {
+            if (depth >= 3) {
                 continue;
             }
 
@@ -1348,6 +1356,14 @@ private:
             }
         }
 
+        for (size_t i = 0; i < decoded.size(); ++i) {
+            if (!std::all_of(decoded[i].begin(), decoded[i].end(),
+                             [i](uint8_t value) { return value == static_cast<uint8_t>(i + 1); })) {
+                std::cout << "[VALIDATION] Reconstructed payload mismatch at original " << i + 1 << std::endl;
+                return false;
+            }
+        }
+        std::cout << "[VALIDATION] NC original payload bytes verified" << std::endl;
         m_decoded = true;
         std::cout << "\n*** DESTINATION " << m_nodeId << " SUCCESSFULLY DECODED ALL MESSAGES! ***" << std::endl;
         std::cout << "Total packets received: " << m_receivedCoeffs.size() << std::endl;
@@ -1388,6 +1404,15 @@ private:
 
             std::cout << "  [TCP] Reassembled framed packet id=" << packetId
                       << " payload=" << payloadBytes << " bytes" << std::endl;
+            auto firstByte = m_tcpRxBuffer.begin() + kTcpHeaderSize;
+            if (packetId == 0 || packetId > m_totalPackets || payloadBytes != m_packetSize ||
+                !std::all_of(firstByte, firstByte + payloadBytes,
+                             [packetId](uint8_t byte) { return byte == static_cast<uint8_t>(packetId); })) {
+                std::cout << "[VALIDATION] TCP payload mismatch" << std::endl;
+                m_tcpRxBuffer.clear();
+                return;
+            }
+            std::cout << "[VALIDATION] TCP original payload bytes verified: " << packetId << std::endl;
             HandleDestinationPacketTCP(packetId, payloadBytes);
             m_tcpRxBuffer.erase(m_tcpRxBuffer.begin(), m_tcpRxBuffer.begin() + totalNeeded);
         }
@@ -1403,7 +1428,7 @@ private:
             return;
         }
         
-        m_receivedPacketIds.insert(packetId);
+        if (!m_receivedPacketIds.insert(packetId).second) return;
         m_totalBytesReceived += payloadBytes;
         uint32_t expectedTotalBytes = m_totalPackets * m_packetSize;
         
@@ -3239,10 +3264,45 @@ void PrintSummary(const std::vector<std::tuple<uint32_t, uint32_t, NetworkStats,
     }
 }
 
+bool ValidateButterflyDetector()
+{
+    const std::vector<std::pair<uint32_t,uint32_t>> edges = {
+        {0,1},{0,2},{1,3},{1,5},{2,3},{2,6},{3,4},{4,5},{4,6}};
+    auto check = [&](bool chord, bool removeEdge, bool relabel) {
+        std::map<uint32_t,std::set<uint32_t>> neighbors;
+        auto label = [relabel](uint32_t n) { const uint32_t ids[] = {0,2,1,3,4,5,6}; return relabel ? ids[n] : n; };
+        for (auto edge : edges) {
+            if (removeEdge && edge == std::make_pair(3u,4u)) continue;
+            auto a = label(edge.first), b = label(edge.second);
+            neighbors[a].insert(b); neighbors[b].insert(a);
+        }
+        if (chord) { neighbors[1].insert(2); neighbors[2].insert(1); }
+        ButterflyDetector detector(0);
+        detector.UpdateTopology(neighbors);
+        const auto& patterns = detector.GetButterflies();
+        if (removeEdge) return patterns.empty();
+        if (patterns.empty()) return false;
+        for (const auto& b : patterns) {
+            std::set<uint32_t> vertices = {b.source,b.r1,b.r2,b.r3,b.r4,b.d1,b.d2};
+            if (vertices.size()!=7 || b.source!=0) return false;
+            for (auto edge : std::vector<std::pair<uint32_t,uint32_t>>{
+                {b.source,b.r1},{b.source,b.r2},{b.r1,b.r3},{b.r2,b.r3},
+                {b.r1,b.d1},{b.r2,b.d2},{b.r3,b.r4},{b.r4,b.d1},{b.r4,b.d2}})
+                if (!neighbors[edge.first].count(edge.second)) return false;
+        }
+        return true;
+    };
+    bool passed = check(false,false,false) && check(false,false,true) &&
+                  check(true,false,false) && check(false,true,false);
+    std::cout << "[VALIDATION] Detector fixtures: " << (passed ? "PASS" : "FAIL") << std::endl;
+    return passed;
+}
+
 int main(int argc, char* argv[])
 {
     SimulationParameters params;
     
+    bool validateDetector = false;
     CommandLine cmd(__FILE__);
     cmd.AddValue("minNodes", "Minimum number of nodes", params.minNodes);
     cmd.AddValue("maxNodes", "Maximum number of nodes", params.maxNodes);
@@ -3250,7 +3310,13 @@ int main(int argc, char* argv[])
     cmd.AddValue("seed", "Random seed", params.randomSeed);
     cmd.AddValue("numGraphs", "Number of graphs per node size", params.numGraphsPerSize);
     cmd.AddValue("verbose", "Enable verbose output", params.verbose);
+    cmd.AddValue("validateDetector", "Run graph motif validation fixtures and exit", validateDetector);
+    cmd.AddValue("topology", "random or butterfly (known seven-node validation topology)", params.topology);
     cmd.Parse(argc, argv);
+    if (validateDetector) return ValidateButterflyDetector() ? 0 : 1;
+    NS_ABORT_MSG_IF(params.topology != "random" && params.topology != "butterfly", "Unknown topology");
+    if (params.topology == "butterfly") { params.minNodes = params.maxNodes = 7; params.numGraphsPerSize = 1; }
+    NS_ABORT_MSG_IF(params.minNodes < 2 || params.maxNodes < params.minNodes || params.numGraphsPerSize == 0 || params.edgeProbability < 0 || params.edgeProbability > 1, "Invalid scenario parameters");
     
     std::cout << "Random Graph Butterfly Network Coding Simulation" << std::endl;
     std::cout << "Seed: " << params.randomSeed << std::endl;
@@ -3263,7 +3329,13 @@ int main(int argc, char* argv[])
         for (uint32_t graphIdx = 0; graphIdx < params.numGraphsPerSize; graphIdx++) {
             uint32_t graphSeed = params.randomSeed + nodeCount * 1000 + graphIdx;
             
-            GraphScenario scenario = BuildGraphScenario(nodeCount, params.edgeProbability, graphSeed);
+            GraphScenario scenario;
+            if (params.topology == "butterfly") {
+                scenario.edges = {{0,1},{0,2},{1,3},{1,5},{2,3},{2,6},{3,4},{4,5},{4,6}};
+                scenario.sourceNode = 0; scenario.destNode = 5; scenario.valid = true;
+            } else {
+                scenario = BuildGraphScenario(nodeCount, params.edgeProbability, graphSeed);
+            }
             if (!scenario.valid) {
                 std::cout << "Skipping graph seed " << graphSeed << " for node count " << nodeCount << " (invalid scenario)" << std::endl;
                 continue;

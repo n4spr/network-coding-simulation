@@ -23,11 +23,39 @@
 #include "ns3/packet.h"
 #include "ns3/network-coding-packet.h"
 #include "ns3/simulator.h"
-#include <random>
+#include "ns3/rng-seed-manager.h"
 
 namespace ns3 {
 
 NS_LOG_COMPONENT_DEFINE ("NetworkCodingTestSuite");
+
+namespace {
+// Independent polynomial arithmetic, without the implementation's log tables.
+uint8_t ReferenceMultiply(uint16_t a, uint16_t b)
+{
+  uint16_t result = 0;
+  for (unsigned bit = 0; bit < 8; ++bit)
+    {
+      if (b & 1) result ^= a;
+      b >>= 1;
+      a <<= 1;
+      if (a & 0x100) a ^= 0x11d;
+    }
+  return static_cast<uint8_t>(result);
+}
+std::vector<uint8_t> Coefficients(uint16_t count, uint8_t point)
+{
+  std::vector<uint8_t> result(count, 1);
+  for (size_t i = 1; i < count; ++i) result[i] = ReferenceMultiply(result[i-1], point);
+  return result;
+}
+std::vector<uint8_t> Original(uint16_t index, uint32_t size)
+{
+  std::vector<uint8_t> result(size);
+  for (uint32_t j = 0; j < size; ++j) result[j] = (17 + index * 31 + j * 7 + index * j) % 256;
+  return result;
+}
+}
 
 // Register the test suite
 static NetworkCodingTestSuite g_networkCodingTestSuite;
@@ -52,6 +80,14 @@ GaloisFieldTestCase::DoRun (void)
   
   TestAddition (gf);
   TestMultiplication (gf);
+  for (unsigned a = 0; a < 256; ++a)
+    {
+      for (unsigned b = 0; b < 256; ++b)
+        {
+          NS_TEST_ASSERT_MSG_EQ(unsigned(gf->Multiply(a,b)), unsigned(ReferenceMultiply(a,b)), "polynomial product");
+        }
+      if (a != 0) { NS_TEST_ASSERT_MSG_EQ(unsigned(ReferenceMultiply(a,gf->Inverse(a))), 1, "polynomial inverse"); }
+    }
   TestDivision (gf);
   TestInverse (gf);
 }
@@ -175,15 +211,32 @@ NetworkCodingTestCase::~NetworkCodingTestCase ()
 void
 NetworkCodingTestCase::DoRun (void)
 {
+  // Equal explicit ns-3 stream assignments must replay coefficient sequences.
+  auto first = CreateObject<NetworkCodingEncoder>(2, 64);
+  auto second = CreateObject<NetworkCodingEncoder>(2, 64);
+  first->AssignStreams(731); second->AssignStreams(731);
+  for (unsigned i = 0; i < 2; ++i)
+    {
+      auto payload = Original(i,64);
+      auto packet = Create<Packet>(payload.data(),payload.size());
+      first->AddPacket(packet,i); second->AddPacket(packet,i);
+    }
+  for (unsigned i = 0; i < 8; ++i)
+    {
+      auto a = first->GenerateCodedPacket(), b = second->GenerateCodedPacket();
+      std::vector<uint8_t> left(a->GetSize()), right(b->GetSize());
+      a->CopyData(left.data(),left.size()); b->CopyData(right.data(),right.size());
+      NS_TEST_ASSERT_MSG_EQ((left == right), true, "assigned stream replay");
+    }
+
   // Test with different packet sizes and generation sizes
   TestCoding (64, 4);
   TestCoding (1024, 8);
   TestCoding (1500, 16);
   
-  // Test with packet loss
-  TestCodingWithLoss (1024, 8, 0.1);
-  TestCodingWithLoss (1024, 8, 0.2);
-  TestCodingWithLoss (1024, 16, 0.3);
+  TestDeliverySchedules (64, 2);
+  TestDeliverySchedules (1024, 8);
+  TestDeliverySchedules (1500, 16);
 }
 
 void
@@ -200,11 +253,8 @@ NetworkCodingTestCase::TestCoding (uint32_t packetSize, uint16_t generationSize)
     {
       uint8_t* buffer = new uint8_t[packetSize];
       
-      // Fill with deterministic data
-      for (uint32_t j = 0; j < packetSize; j++)
-        {
-          buffer[j] = (i * j) % 256;
-        }
+      const auto expected = Original(i, packetSize);
+      std::copy(expected.begin(), expected.end(), buffer);
       
       Ptr<Packet> packet = Create<Packet> (buffer, packetSize);
       originalPackets.push_back (packet);
@@ -224,7 +274,7 @@ NetworkCodingTestCase::TestCoding (uint32_t packetSize, uint16_t generationSize)
   for (uint16_t i = 0; i < generationSize; i++)
     {
       // Generate a coded packet
-      Ptr<Packet> codedPacket = encoder->GenerateCodedPacket ();
+      Ptr<Packet> codedPacket = encoder->GenerateCodedPacket (Coefficients(generationSize, i + 1));
       NS_TEST_ASSERT_MSG_NE (codedPacket, nullptr, "Failed to generate coded packet");
       
       // Process the coded packet
@@ -240,6 +290,8 @@ NetworkCodingTestCase::TestCoding (uint32_t packetSize, uint16_t generationSize)
   std::vector<Ptr<Packet>> decodedPackets = decoder->GetDecodedPackets ();
   NS_TEST_ASSERT_MSG_EQ (decodedPackets.size (), generationSize, "Number of decoded packets doesn't match generation size");
   
+  if (decodedPackets.size() != generationSize) return;
+
   // Verify that decoded packets match original packets
   for (uint16_t i = 0; i < generationSize; i++)
     {
@@ -267,72 +319,70 @@ NetworkCodingTestCase::TestCoding (uint32_t packetSize, uint16_t generationSize)
 }
 
 void
-NetworkCodingTestCase::TestCodingWithLoss (uint32_t packetSize, uint16_t generationSize, double lossRate)
+NetworkCodingTestCase::TestDeliverySchedules(uint32_t packetSize, uint16_t generationSize)
 {
-  // Create encoder and decoder
-  Ptr<NetworkCodingEncoder> encoder = CreateObject<NetworkCodingEncoder> (generationSize, packetSize);
-  Ptr<NetworkCodingDecoder> decoder = CreateObject<NetworkCodingDecoder> (generationSize, packetSize);
-  
-  // Create random number generator for packet loss simulation
-  std::random_device rd;
-  std::mt19937 gen (rd ());
-  std::uniform_real_distribution<> dis (0.0, 1.0);
-  
-  // Create original packets
-  for (uint16_t i = 0; i < generationSize; i++)
+  auto encoder = CreateObject<NetworkCodingEncoder>(generationSize, packetSize);
+  auto decoder = CreateObject<NetworkCodingDecoder>(generationSize, packetSize);
+  for (uint16_t i = 0; i < generationSize; ++i)
     {
-      uint8_t* buffer = new uint8_t[packetSize];
-      
-      // Fill with deterministic data
-      for (uint32_t j = 0; j < packetSize; j++)
-        {
-          buffer[j] = (i * j) % 256;
-        }
-      
-      Ptr<Packet> packet = Create<Packet> (buffer, packetSize);
-      
-      // Add packet to encoder
-      encoder->AddPacket (packet, i);
-      
-      delete[] buffer;
+      auto data = Original(i, packetSize);
+      encoder->AddPacket(Create<Packet>(data.data(), data.size()), i);
     }
-  
-  // Generate extra coded packets to account for loss
-  uint16_t extraPackets = static_cast<uint16_t> (generationSize * lossRate / (1.0 - lossRate));
-  uint16_t totalPackets = generationSize + extraPackets;
-  
-  // Generate and process coded packets
-  uint16_t receivedPackets = 0;
-  
-  for (uint16_t i = 0; i < totalPackets; i++)
+  // Malformed equations must neither be padded/truncated nor increase rank.
+  for (bool wrongGenerationSize : {false,true})
     {
-      // Generate a coded packet
-      Ptr<Packet> codedPacket = encoder->GenerateCodedPacket ();
-      
-      // Simulate packet loss
-      if (dis (gen) >= lossRate)
+      auto malformed = Create<Packet>(packetSize - 1);
+      NetworkCodingHeader header;
+      header.SetGenerationSize(wrongGenerationSize ? generationSize + 1 : generationSize);
+      header.SetCoefficients(std::vector<uint8_t>(header.GetGenerationSize(),1));
+      if (wrongGenerationSize) malformed = Create<Packet>(packetSize);
+      malformed->AddHeader(header);
+      NS_TEST_ASSERT_MSG_EQ(decoder->ProcessCodedPacket(malformed), false, "reject malformed equation");
+      NS_TEST_ASSERT_MSG_EQ(decoder->GetRank(),0,"malformed input leaves rank unchanged");
+    }
+  // Erase the first two transmissions, then deliver a full-rank Vandermonde
+  // schedule in reverse order. Duplicate deliveries must not increase rank.
+  encoder->GenerateCodedPacket(Coefficients(generationSize, 1));
+  encoder->GenerateCodedPacket(Coefficients(generationSize, 2));
+  for (uint16_t row = 0; row < generationSize; ++row)
+    {
+      auto coeffs = Coefficients(generationSize, generationSize + 2 - row);
+      auto packet = encoder->GenerateCodedPacket(coeffs);
+      NS_TEST_ASSERT_MSG_NE(packet, nullptr, "explicit encoder output");
+      auto payloadPacket = packet->Copy();
+      NetworkCodingHeader header;
+      payloadPacket->RemoveHeader(header);
+      std::vector<uint8_t> actual(packetSize), expected(packetSize, 0);
+      payloadPacket->CopyData(actual.data(), actual.size());
+      for (uint16_t i = 0; i < generationSize; ++i)
         {
-          // Packet not lost, process it
-          decoder->ProcessCodedPacket (codedPacket);
-          receivedPackets++;
+          auto original = Original(i, packetSize);
+          for (uint32_t j = 0; j < packetSize; ++j) expected[j] ^= ReferenceMultiply(coeffs[i], original[j]);
         }
-      
-      // If we can decode, stop sending more packets
-      if (decoder->CanDecode ())
+      NS_TEST_ASSERT_MSG_EQ((actual == expected), true, "coded payload against polynomial oracle");
+      NS_TEST_ASSERT_MSG_EQ(decoder->ProcessCodedPacket(packet), true, "independent equation");
+      NS_TEST_ASSERT_MSG_EQ(decoder->ProcessCodedPacket(packet), false, "duplicate equation");
+      NS_TEST_ASSERT_MSG_EQ(decoder->GetRank(), row + 1, "rank after duplicate");
+      if (row + 1 < generationSize)
         {
-          break;
+          NS_TEST_ASSERT_MSG_EQ(decoder->CanDecode(), false, "insufficient rank");
+          NS_TEST_ASSERT_MSG_EQ(decoder->GetDecodedPackets().empty(), true, "no false decoding");
         }
     }
-  
-  // Verify that we can decode with high probability (may fail occasionally)
-  NS_TEST_ASSERT_MSG_EQ (decoder->CanDecode (), true, "Failed to decode with packet loss");
-  
-  // Verify that we received fewer packets than we sent
-  NS_TEST_ASSERT_MSG_LT (receivedPackets, totalPackets, "Received too many packets");
-  
-  // Get decoded packets and verify their size
-  std::vector<Ptr<Packet>> decodedPackets = decoder->GetDecodedPackets ();
-  NS_TEST_ASSERT_MSG_EQ (decodedPackets.size (), generationSize, "Number of decoded packets doesn't match generation size");
+  auto decoded = decoder->GetDecodedPackets();
+  NS_TEST_ASSERT_MSG_EQ(decoded.size(), generationSize, "recovery after prescribed erasures");
+  if (decoded.size() != generationSize) return;
+  for (uint16_t i = 0; i < generationSize; ++i)
+    {
+      std::vector<uint8_t> actual(packetSize);
+      decoded[i]->CopyData(actual.data(), actual.size());
+      NS_TEST_ASSERT_MSG_EQ((actual == Original(i,packetSize)), true, "recovered original bytes");
+    }
+  decoder->NextGeneration();
+  NS_TEST_ASSERT_MSG_EQ(decoder->GetRank(), 0, "new generation starts empty");
+  auto stale = encoder->GenerateCodedPacket(Coefficients(generationSize, 1));
+  NS_TEST_ASSERT_MSG_EQ(decoder->ProcessCodedPacket(stale), false, "reject previous generation");
+  NS_TEST_ASSERT_MSG_EQ(decoder->GetRank(), 0, "stale data leaves rank unchanged");
 }
 
 //-----------------------------------------------------------------------------

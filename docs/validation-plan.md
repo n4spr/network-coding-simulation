@@ -31,3 +31,7 @@ Gate: publish a metric dictionary (layer, flow filter, numerator, denominator, u
 - Use pilot runtime, failure frequency, and interval widths to propose the final ranges and repetition count for user review. Ten pilot repetitions are not a precision guarantee. Do not start the full campaign yet.
 
 Grounding and caveats are recorded in thesis-agent-note.md. Add permanent tests and metric instrumentation before claiming either protocol's performance advantage.
+
+## Implemented checkpoint
+
+Run `python3 test/validate-correctness.py` to reproduce the unit, detector, known-topology OLSR and fixed-butterfly no-loss checks. The OLSR example exposes `--validateDetector=1` and `--topology=butterfly` for these fixtures. Default random experiments keep the random topology behavior. Both use actual application payload bytes for correctness checks. These checks do not complete the reliability or measurement gates: next are prescribed data/ACK losses and common device-level traffic accounting, then the pilot. The main random study's one-versus-two-destination design is awaiting the user's choice; no new multicast implementation is implied by the single-destination fixture.

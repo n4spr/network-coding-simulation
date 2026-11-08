@@ -108,12 +108,11 @@ private:
   void TestCoding (uint32_t packetSize, uint16_t generationSize);
   
   /**
-   * \brief Test packet encoding and decoding with packet loss
+   * \brief Test prescribed erasure and duplicate delivery schedules
    * \param packetSize Size of packets
    * \param generationSize Size of generation
-   * \param lossRate Packet loss rate
    */
-  void TestCodingWithLoss (uint32_t packetSize, uint16_t generationSize, double lossRate);
+  void TestDeliverySchedules (uint32_t packetSize, uint16_t generationSize);
 };
 
 /**

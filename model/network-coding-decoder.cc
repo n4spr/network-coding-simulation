@@ -188,25 +188,20 @@ NetworkCodingDecoder::ProcessCodedPacket (Ptr<const Packet> packet)
     return false;
   }
   
-  // Pad coefficients to generation size if needed
-  std::vector<uint8_t> paddedCoeffs(m_generationSize, 0);
-  for (size_t i = 0; i < std::min(coefficients.size(), (size_t)m_generationSize); i++) {
-    paddedCoeffs[i] = coefficients[i];
-  }
-  
+  if (header.GetGenerationSize() != m_generationSize || coefficients.size() != m_generationSize ||
+      packetCopy->GetSize() != m_packetSize)
+    {
+      NS_LOG_WARN("Rejecting incompatible generation or payload size");
+      return false;
+    }
+
+  const auto& paddedCoeffs = coefficients;
+
   // Check if the packet is innovative before storing
   if (!IsInnovative(paddedCoeffs)) {
     NS_LOG_INFO("Received non-innovative (redundant) packet.");
     return false;
   }
-  
-  // Check packet payload size
-  if (packetCopy->GetSize () != m_packetSize)
-    {
-      NS_LOG_WARN ("Packet size mismatch: expected " << m_packetSize 
-                    << " but got " << packetCopy->GetSize ());
-      // Handle size mismatch gracefully
-    }
   
   // Extract the payload
   std::vector<uint8_t> payload(m_packetSize, 0);
