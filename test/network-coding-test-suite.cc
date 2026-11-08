@@ -85,8 +85,8 @@ GaloisFieldTestCase::TestAddition (Ptr<GaloisField> gf)
 void
 GaloisFieldTestCase::TestMultiplication (Ptr<GaloisField> gf)
 {
-  // Test multiplication
-  NS_TEST_ASSERT_MSG_EQ (gf->Multiply (0x53, 0xCA), 0x01, "GF(2^8) multiplication failed");
+  // This product uses the implementation's 0x11d polynomial.
+  NS_TEST_ASSERT_MSG_EQ (gf->Multiply (0x53, 0xCA), 0x8f, "GF(2^8) multiplication failed");
   NS_TEST_ASSERT_MSG_EQ (gf->Multiply (0, 0x01), 0, "GF(2^8) multiplication with zero failed");
   NS_TEST_ASSERT_MSG_EQ (gf->Multiply (0x01, 0x01), 0x01, "GF(2^8) multiplication by 1 failed");
   
