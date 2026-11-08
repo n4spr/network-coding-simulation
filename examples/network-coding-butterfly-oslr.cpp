@@ -4,6 +4,7 @@
 #include "ns3/network-module.h"
 #include "ns3/internet-module.h"
 #include "ns3/point-to-point-module.h"
+#include "experiment-metrics.h"
 #include "ns3/point-to-point-net-device.h"
 #include "ns3/applications-module.h"
 #include "ns3/tcp-socket-factory.h"
@@ -134,6 +135,9 @@ struct SimulationParameters {
     uint32_t maxNodes = 50;
     double edgeProbability = 0.3;
     std::string topology = "random";
+    std::string metricsFile = "random-graph-metrics-v2.csv";
+    std::string tracePrefix;
+    double cleanupTime = 1.0;
     uint32_t packetSize = 1024;
     uint16_t generationSize = 2;
     uint32_t totalPackets = 2;
@@ -148,6 +152,7 @@ struct SimulationParameters {
 
 struct NetworkStats {
     std::string method;
+    ncmetrics::Summary measured;
     uint32_t nodeCount = 0;
     uint32_t edgeCount = 0;
     uint64_t totalTransmissions = 0;
@@ -966,6 +971,7 @@ private:
     void SendPackets()
     {
         if (!m_isSource || !m_running) return;
+        ncmetrics::active->Offer();
         
         std::cout << "\n=== SOURCE NODE " << m_nodeId << " STARTING TRANSMISSION ===" << std::endl;
         std::cout << "Total packets to send: " << m_totalPackets << std::endl;
@@ -1252,6 +1258,15 @@ private:
         std::cout << "]" << std::endl;
         std::cout << "  Payload hash: 0x" << std::hex << payloadHash << std::dec
                   << (wasCoded ? " (coded snapshot)" : " (original payload)") << std::endl;
+        for (size_t original=0; original<coeffs.size(); ++original) {
+            bool identity=coeffs[original]==1;
+            for (size_t j=0;j<coeffs.size();++j) if (j!=original && coeffs[j]!=0) identity=false;
+            if (identity && payload.size()==m_packetSize &&
+                std::all_of(payload.begin(),payload.end(),[original](uint8_t b){return b==original+1;})) {
+                m_receivedPacketIds.insert(original+1);
+                ncmetrics::active->Deliver(m_nodeId,uint64_t(m_receivedPacketIds.size())*m_packetSize);
+            }
+        }
         AttemptDestinationDecode();
     }
 
@@ -1364,6 +1379,7 @@ private:
             }
         }
         std::cout << "[VALIDATION] NC original payload bytes verified" << std::endl;
+        ncmetrics::active->Complete(m_nodeId,uint64_t(m_totalPackets)*m_packetSize);
         m_decoded = true;
         std::cout << "\n*** DESTINATION " << m_nodeId << " SUCCESSFULLY DECODED ALL MESSAGES! ***" << std::endl;
         std::cout << "Total packets received: " << m_receivedCoeffs.size() << std::endl;
@@ -1430,6 +1446,7 @@ private:
         
         if (!m_receivedPacketIds.insert(packetId).second) return;
         m_totalBytesReceived += payloadBytes;
+        ncmetrics::active->Deliver(m_nodeId,m_totalBytesReceived);
         uint32_t expectedTotalBytes = m_totalPackets * m_packetSize;
         
         std::cout << "[" << Simulator::Now().GetSeconds() 
@@ -1438,6 +1455,7 @@ private:
                  << ", bytes: " << m_totalBytesReceived << "/" << expectedTotalBytes << ")" << std::endl;
         
         if (m_receivedPacketIds.size() >= m_totalPackets) {
+            ncmetrics::active->Complete(m_nodeId,m_totalBytesReceived);
             m_decoded = true;
             std::cout << "\n*** DESTINATION " << m_nodeId << " SUCCESSFULLY RECEIVED ALL MESSAGES! ***" << std::endl;
             std::cout << "Total unique packets received: " << m_receivedPacketIds.size() << std::endl;
@@ -1735,6 +1753,7 @@ private:
         Ipv4Address finalDest = m_pendingPackets[batchStart].finalDestination;
 
         if (batchSize >= 2) {
+            ncmetrics::active->RecordXor();
             for (size_t i = 0; i < batchSize; i++) {
                 PendingPacketInfo& pending = m_pendingPackets[batchStart + i];
                 std::vector<uint8_t> data(m_packetSize);
@@ -2032,6 +2051,7 @@ void NetworkCodingApp::HandleButterflyRoleR3(const NetworkCodingHeader& header, 
     }
 
     if (state.fromR1 && state.fromR2) {
+        ncmetrics::active->RecordXor();
         Ptr<Packet> coded = XorPackets(state.fromR1, state.fromR2);
         std::vector<uint8_t> coeffs = CombineCoefficients(state.coeffsR1, state.coeffsR2);
         NetworkCodingHeader forwardHeader = state.referenceHeader;
@@ -2906,6 +2926,10 @@ NetworkStats RunSimulation(uint32_t numNodes, uint32_t graphSeed,
     NetDeviceContainer devices;
     Ipv4InterfaceContainer interfaces;
     NodeContainer nodes = CreateRandomTopology(edges, numNodes, params, devices, interfaces, graphSeed, useNetworkCoding);
+    ncmetrics::TransferMetrics metrics(1,params.simulationTime-params.cleanupTime,
+        params.tracePrefix.empty()?"":params.tracePrefix+"-"+(useNetworkCoding?"nc":"tcp")+"-"+std::to_string(graphSeed)+".csv",
+        params.topology=="butterfly");
+    metrics.Install(nodes); ncmetrics::active=&metrics;
     
     // Setup applications
     std::vector<Ptr<NetworkCodingApp>> apps(numNodes);
@@ -3001,7 +3025,7 @@ NetworkStats RunSimulation(uint32_t numNodes, uint32_t graphSeed,
         
         nodes.Get(i)->AddApplication(apps[i]);
         apps[i]->SetStartTime(Seconds(25.0));  // Much longer delay for OLSR convergence
-        apps[i]->SetStopTime(Seconds(params.simulationTime));
+        apps[i]->SetStopTime(Seconds(params.simulationTime-params.cleanupTime));
     }
     
     // Enable tracing
@@ -3067,85 +3091,27 @@ NetworkStats RunSimulation(uint32_t numNodes, uint32_t graphSeed,
     
     std::cout << "Total application transmissions: " << totalAppTransmissions << std::endl;
     if (useNetworkCoding) {
-        std::cout << "Network coding transmissions: " << totalNCTransmissions << std::endl;
-    }
-    
-    flowMonitor->CheckForLostPackets();
-    auto flowStats = flowMonitor->GetFlowStats();
-    
-    uint32_t totalTx = 0, totalRx = 0, totalLost = 0;
-    double totalDelay = 0;
-    uint32_t delayCount = 0;
-    Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier>(flowHelper.GetClassifier());
-    uint64_t appPortTx = 0;
-    uint64_t appPortRx = 0;
-    uint64_t appPortRxBytes = 0;
-    
-    for (auto& flow : flowStats) {
-        totalTx += flow.second.txPackets;
-        totalRx += flow.second.rxPackets;
-        totalLost += flow.second.lostPackets;
-
-        if (flow.second.rxPackets > 0) {
-            totalDelay += flow.second.delaySum.GetSeconds();
-            delayCount += flow.second.rxPackets;
-        }
-
-        if (classifier) {
-            Ipv4FlowClassifier::FiveTuple tuple = classifier->FindFlow(flow.first);
-            bool matchesPort = tuple.destinationPort == kNcAppPort;
-            bool matchesProtocol = useNetworkCoding ? (tuple.protocol == 17) : (tuple.protocol == 6);
-            if (matchesPort && matchesProtocol) {
-                appPortTx += flow.second.txPackets;
-                appPortRx += flow.second.rxPackets;
-                appPortRxBytes += flow.second.rxBytes;
-            }
-        }
-    }
-    
-    stats.packetLossRate = totalTx > 0 ? (double)totalLost / totalTx : 0;
-    stats.averageDelay = delayCount > 0 ? totalDelay / delayCount : 0;
-    stats.throughput = stats.totalTime > 0 ? (totalRx * params.packetSize * 8) / stats.totalTime : 0;
-    
-    if (!useNetworkCoding) {
-        if (appPortTx > 0) {
-            stats.totalTransmissions = appPortTx;
-            std::cout << "FlowMonitor TCP transmissions (port " << kNcAppPort << "): TX="
-                      << appPortTx << ", RX=" << appPortRx << std::endl;
-        } else {
-            std::cout << "FlowMonitor did not observe TCP packets on port " << kNcAppPort
-                      << "; using application counters." << std::endl;
-        }
+        std::cout << "NC-role application sends (diagnostic): " << totalNCTransmissions << std::endl;
     }
 
-    if (useNetworkCoding) {
-        stats.butterflyUsageCount = stats.ncTransmissions;
-        stats.bottleneckUsage = stats.butterflyUsageCount;
-        std::cout << "Butterfly XOR activations: " << stats.butterflyXorStarts << std::endl;
-    } else {
-        stats.bottleneckUsage = 0;
-    }
-
-    uint64_t deliveredPackets = appPortRx > 0 ? appPortRx : (destinationDecoded ? params.totalPackets : 0);
-    uint64_t deliveredBytes = appPortRxBytes > 0 ? appPortRxBytes : (deliveredPackets * params.packetSize);
-
-    if (params.totalPackets > 0) {
-        stats.successRate = std::min<double>(1.0, static_cast<double>(deliveredPackets) / params.totalPackets);
-    }
-    stats.goodput = stats.totalTime > 0 ? (deliveredBytes * 8) / stats.totalTime : 0;
-    
+    flowMonitor->CheckForLostPackets(Seconds(params.cleanupTime));
+    if (!params.tracePrefix.empty()) flowMonitor->SerializeToXmlFile(
+        params.tracePrefix+(useNetworkCoding?"-nc-":"-tcp-")+std::to_string(graphSeed)+"-ip.xml",true,true);
+    stats.measured=metrics.GetSummary();
+    stats.totalTransmissions=stats.measured.frames;
+    stats.bottleneckUsage=stats.measured.centralFrames;
+    stats.successRate=stats.measured.completed;
+    stats.goodput=stats.measured.completionGoodput;
+    stats.butterflyUsageCount=stats.butterflyXorStarts;
+    metrics.Write(params.metricsFile,"olsr_"+params.topology,useNetworkCoding?"NC":"TCP",numNodes,edges.size(),
+                  graphSeed,params.topology=="butterfly"?std::to_string(params.dataRate)+"Mbps":"",0,
+                  sourceNode,std::to_string(destNode));
     // Print packet flow summary
     std::cout << "\n=== PACKET FLOW SUMMARY ===" << std::endl;
     std::cout << "Source node " << sourceNode << " -> Destination node " << destNode << std::endl;
     std::cout << "Total network transmissions: " << stats.totalTransmissions << std::endl;
     if (useNetworkCoding) {
-        std::cout << "Network coding transmissions: " << stats.ncTransmissions << std::endl;
-        std::cout << "Regular transmissions: " << (stats.totalTransmissions - stats.ncTransmissions) << std::endl;
-        std::cout << "Butterfly patterns utilized: " << stats.butterflyUsageCount << std::endl;
-        if (stats.ncTransmissions > 0) {
-            std::cout << "Network coding efficiency: " << std::fixed << std::setprecision(1) 
-                     << (100.0 * stats.ncTransmissions / stats.totalTransmissions) << "% of transmissions" << std::endl;
-        }
+        std::cout << "NC-role application sends (diagnostic): " << stats.ncTransmissions << std::endl;
         std::cout << "Butterfly XOR activations: " << stats.butterflyXorStarts << std::endl;
     }
     std::cout << "Destination decode status: " << (destinationDecoded ? "SUCCESS" : "FAILED") << std::endl;
@@ -3170,97 +3136,22 @@ NetworkStats RunSimulation(uint32_t numNodes, uint32_t graphSeed,
     }
 
     Simulator::Destroy();
+    ncmetrics::active=nullptr;
     return stats;
 }
 
-void WriteCsvResults(const std::string& filename,
-                     const SimulationParameters& params,
-                     const std::vector<std::tuple<uint32_t, uint32_t, NetworkStats, NetworkStats>>& results)
+void PrintSummary(const std::vector<std::tuple<uint32_t,uint32_t,NetworkStats,NetworkStats>>& results)
 {
-    if (filename.empty() || results.empty()) {
-        return;
-    }
-
-    bool fileExists = std::ifstream(filename).good();
-    std::ofstream outFile(filename, std::ios_base::app);
-    if (!outFile.is_open()) {
-        std::cerr << "Error: Could not open CSV file: " << filename << std::endl;
-        return;
-    }
-
-    if (!fileExists) {
-        outFile << "nodeCount,edgeCount,graphSeed,packetSize,generationSize,totalPackets,"
-                << "edgeProbability,dataRateMbps,linkDelayMs,"
-                << "tcpTime,ncTime,tcpTx,ncTx,tcpBottleneck,ncBottleneck,"
-                << "tcpSuccessRate,ncSuccessRate,tcpAvgDelay,ncAvgDelay,"
-                << "tcpThroughput,ncThroughput,tcpGoodput,ncGoodput,"
-                << "tcpLossRate,ncLossRate,tcpSuccesses,ncSuccesses,"
-                << "ncButterflyUsage,ncXorStarts\n";
-    }
-
-    for (const auto& [nodeCount, graphSeed, tcpStats, ncStats] : results) {
-        outFile << nodeCount << ","
-                << tcpStats.edgeCount << ","
-                << graphSeed << ","
-                << params.packetSize << ","
-                << params.generationSize << ","
-                << params.totalPackets << ","
-                << params.edgeProbability << ","
-                << params.dataRate << ","
-                << params.linkDelay << ","
-                << tcpStats.totalTime << ","
-                << ncStats.totalTime << ","
-                << tcpStats.totalTransmissions << ","
-                << ncStats.totalTransmissions << ","
-                << tcpStats.bottleneckUsage << ","
-                << ncStats.bottleneckUsage << ","
-                << tcpStats.successRate << ","
-                << ncStats.successRate << ","
-                << tcpStats.averageDelay << ","
-                << ncStats.averageDelay << ","
-                << tcpStats.throughput << ","
-                << ncStats.throughput << ","
-                << tcpStats.goodput << ","
-                << ncStats.goodput << ","
-                << tcpStats.packetLossRate << ","
-                << ncStats.packetLossRate << ","
-                << tcpStats.successfulDecodings << ","
-                << ncStats.successfulDecodings << ","
-                << ncStats.butterflyUsageCount << ","
-                << ncStats.butterflyXorStarts << "\n";
-    }
-
-    outFile.close();
-    std::cout << "Results written to " << filename << std::endl;
-}
-
-void PrintSummary(const std::vector<std::tuple<uint32_t, uint32_t, NetworkStats, NetworkStats>>& results)
-{
-    std::cout << "\n" << std::string(80, '=') << std::endl;
-    std::cout << "SIMULATION SUMMARY" << std::endl;
-    std::cout << std::string(80, '=') << std::endl;
-    
-    std::cout << std::left << std::setw(8) << "Nodes"
-              << std::setw(8) << "Edges" 
-              << std::setw(12) << "TCP Tx"
-              << std::setw(12) << "NC Tx"
-              << std::setw(12) << "CodingGain"
-              << std::setw(12) << "Butterflies"
-              << std::setw(12) << "XORStarts" << std::endl;
-    std::cout << std::string(76, '-') << std::endl;
-    
-    for (const auto& [nodeCount, graphSeed, tcpStats, ncStats] : results) {
-        double codingGain = (ncStats.totalTransmissions > 0)
-            ? static_cast<double>(tcpStats.totalTransmissions) / ncStats.totalTransmissions
-            : 1.0;
-        
-        std::cout << std::left << std::setw(8) << nodeCount
-                  << std::setw(8) << tcpStats.edgeCount
-                  << std::setw(12) << tcpStats.totalTransmissions
-                  << std::setw(12) << ncStats.totalTransmissions
-                  << std::setw(12) << std::fixed << std::setprecision(2) << codingGain
-                  << std::setw(12) << ncStats.butterflyUsageCount
-                  << std::setw(12) << ncStats.butterflyXorStarts << std::endl;
+    std::cout << "\nMeasured one-destination OLSR results (PPP traffic cost)\n";
+    for (const auto& [nodes,seed,tcp,nc]:results) {
+        for (const auto* stats:{&tcp,&nc}) {
+            const auto& m=stats->measured;
+            std::cout << stats->method << " nodes=" << nodes << " seed=" << seed
+                      << " completed=" << m.completed << "/1 useful_bytes=" << m.usefulBytes
+                      << " frames=" << m.frames << " bytes=" << m.bytes << " completion_s=";
+            if (m.completion>=0) std::cout << m.completion; else std::cout << "NA";
+            std::cout << std::endl;
+        }
     }
 }
 
@@ -3309,10 +3200,16 @@ int main(int argc, char* argv[])
     cmd.AddValue("edgeProb", "Edge probability for random graph", params.edgeProbability);
     cmd.AddValue("seed", "Random seed", params.randomSeed);
     cmd.AddValue("numGraphs", "Number of graphs per node size", params.numGraphsPerSize);
+    cmd.AddValue("metricsFile", "Schema-2 metrics CSV", params.metricsFile);
+    cmd.AddValue("tracePrefix", "Optional device event CSV prefix", params.tracePrefix);
+    cmd.AddValue("simulationTime", "Simulation end time (s)", params.simulationTime);
+    cmd.AddValue("cleanupTime", "Drain time after application stop (s)", params.cleanupTime);
+    cmd.AddValue("dataRate", "All point-to-point link rates (Mbps)", params.dataRate);
     cmd.AddValue("verbose", "Enable verbose output", params.verbose);
     cmd.AddValue("validateDetector", "Run graph motif validation fixtures and exit", validateDetector);
     cmd.AddValue("topology", "random or butterfly (known seven-node validation topology)", params.topology);
     cmd.Parse(argc, argv);
+    NS_ABORT_MSG_IF(params.cleanupTime<=0 || params.simulationTime-params.cleanupTime<=55 || params.dataRate<=0,"Invalid deadline, cleanup time, or rate");
     if (validateDetector) return ValidateButterflyDetector() ? 0 : 1;
     NS_ABORT_MSG_IF(params.topology != "random" && params.topology != "butterfly", "Unknown topology");
     if (params.topology == "butterfly") { params.minNodes = params.maxNodes = 7; params.numGraphsPerSize = 1; }
@@ -3351,12 +3248,6 @@ int main(int argc, char* argv[])
             
             results.emplace_back(nodeCount, graphSeed, tcpStats, ncStats);
 
-            double codingGain = (ncStats.totalTransmissions > 0)
-                ? static_cast<double>(tcpStats.totalTransmissions) / ncStats.totalTransmissions
-                : 1.0;
-            std::cout << "[SCENARIO] Coding gain (TCP/NC transmissions): "
-                      << std::fixed << std::setprecision(2) << codingGain << std::endl;
-            
             if (params.verbose) {
                 std::cout << "Node " << nodeCount << ", Graph " << graphIdx 
                          << " - TCP: " << tcpStats.totalTransmissions 
@@ -3367,6 +3258,6 @@ int main(int argc, char* argv[])
     }
     
     PrintSummary(results);
-    WriteCsvResults("random_graph_results.csv", params, results);
+
     return 0;
 }
