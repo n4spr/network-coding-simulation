@@ -22,10 +22,39 @@
 #define NETWORK_CODING_PACKET_H
 
 #include "ns3/header.h"
+#include "ns3/ipv4-address.h"
 #include <vector>
 #include <set>
+#include <cstdint>
 
 namespace ns3 {
+
+struct ButterflyHeaderInfo
+{
+  uint32_t butterflyId = 0;
+  uint32_t sourceNode = 0;
+  uint32_t r1 = 0;
+  uint32_t r2 = 0;
+  uint32_t r3 = 0;
+  uint32_t r4 = 0;
+  uint32_t d1 = 0;
+  uint32_t d2 = 0;
+  uint32_t targetExitNode = 0;
+};
+
+enum ButterflyHopRole : uint8_t
+{
+  BUTTERFLY_HOP_NONE = 0,
+  BUTTERFLY_HOP_SOURCE_TO_R1 = 1,
+  BUTTERFLY_HOP_SOURCE_TO_R2 = 2,
+  BUTTERFLY_HOP_R1_TO_R3 = 3,
+  BUTTERFLY_HOP_R2_TO_R3 = 4,
+  BUTTERFLY_HOP_R1_TO_D1 = 5,
+  BUTTERFLY_HOP_R2_TO_D2 = 6,
+  BUTTERFLY_HOP_R3_TO_R4 = 7,
+  BUTTERFLY_HOP_R4_TO_D1 = 8,
+  BUTTERFLY_HOP_R4_TO_D2 = 9
+};
 
 /**
  * \ingroup network-coding
@@ -120,11 +149,27 @@ public:
   void SetHopSequence(uint64_t seq);
   uint64_t GetHopSequence() const;
 
+  void SetFinalDestination(const Ipv4Address& addr);
+  Ipv4Address GetFinalDestination() const;
+  bool HasFinalDestination() const;
+
+  void SetButterflyInfo(const ButterflyHeaderInfo& info);
+  const ButterflyHeaderInfo& GetButterflyInfo() const;
+  bool HasButterflyInfo() const;
+
+  void SetButterflyHopRole(uint8_t role);
+  uint8_t GetButterflyHopRole() const;
+
 private:
   uint32_t m_generationId;
   uint16_t m_generationSize;
   std::vector<uint8_t> m_coefficients;
   uint64_t m_hopSequence; // Unique ID for hop-by-hop retransmissions
+  Ipv4Address m_finalDestination;
+  bool m_hasFinalDestination;
+  ButterflyHeaderInfo m_butterflyInfo;
+  bool m_hasButterflyInfo = false;
+  uint8_t m_butterflyHopRole = BUTTERFLY_HOP_NONE;
 };
 
 /**

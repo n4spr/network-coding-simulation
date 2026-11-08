@@ -48,10 +48,17 @@ NetworkCodingHeader::GetInstanceTypeId (void) const
   return GetTypeId ();
 }
 
+namespace {
+const uint32_t kNcHeaderMetaSignature = 0x4e434d44; // 'NCMD'
+const uint32_t kNcHeaderButterflySignature = 0x4e434246; // 'NCBF'
+}
+
 NetworkCodingHeader::NetworkCodingHeader ()
   : m_generationId (0),
     m_generationSize (0),
-    m_hopSequence(0)
+    m_hopSequence(0),
+    m_finalDestination(Ipv4Address()),
+    m_hasFinalDestination(false)
 {
 }
 
@@ -107,6 +114,56 @@ NetworkCodingHeader::GetHopSequence() const
   return m_hopSequence;
 }
 
+void
+NetworkCodingHeader::SetFinalDestination(const Ipv4Address& addr)
+{
+  m_finalDestination = addr;
+  m_hasFinalDestination = (addr != Ipv4Address());
+}
+
+Ipv4Address
+NetworkCodingHeader::GetFinalDestination() const
+{
+  return m_finalDestination;
+}
+
+bool
+NetworkCodingHeader::HasFinalDestination() const
+{
+  return m_hasFinalDestination;
+}
+
+void
+NetworkCodingHeader::SetButterflyInfo(const ButterflyHeaderInfo& info)
+{
+  m_butterflyInfo = info;
+  m_hasButterflyInfo = true;
+}
+
+const ButterflyHeaderInfo&
+NetworkCodingHeader::GetButterflyInfo() const
+{
+  return m_butterflyInfo;
+}
+
+bool
+NetworkCodingHeader::HasButterflyInfo() const
+{
+  return m_hasButterflyInfo;
+}
+
+void
+NetworkCodingHeader::SetButterflyHopRole(uint8_t role)
+{
+  m_butterflyHopRole = role;
+}
+
+uint8_t
+NetworkCodingHeader::GetButterflyHopRole() const
+{
+  return m_butterflyHopRole;
+}
+
 void 
 NetworkCodingHeader::Serialize (Buffer::Iterator start) const
 {
@@ -135,6 +192,30 @@ NetworkCodingHeader::Serialize (Buffer::Iterator start) const
         {
           start.WriteU8 (0);  // Pad with zeros
         }
+    }
+
+  if (m_hasFinalDestination)
+    {
+      start.WriteHtonU32(kNcHeaderMetaSignature);
+      start.WriteHtonU32(m_finalDestination.Get());
+    }
+
+  if (m_hasButterflyInfo)
+    {
+      start.WriteHtonU32(kNcHeaderButterflySignature);
+      start.WriteHtonU32(m_butterflyInfo.butterflyId);
+      start.WriteHtonU32(m_butterflyInfo.sourceNode);
+      start.WriteHtonU32(m_butterflyInfo.r1);
+      start.WriteHtonU32(m_butterflyInfo.r2);
+      start.WriteHtonU32(m_butterflyInfo.r3);
+      start.WriteHtonU32(m_butterflyInfo.r4);
+      start.WriteHtonU32(m_butterflyInfo.d1);
+      start.WriteHtonU32(m_butterflyInfo.d2);
+      start.WriteHtonU32(m_butterflyInfo.targetExitNode);
+      start.WriteU8(m_butterflyHopRole);
+      start.WriteU8(0); // pad to even bytes
+      start.WriteU8(0);
+      start.WriteU8(0);
     }
 }
 
@@ -184,6 +265,45 @@ NetworkCodingHeader::Deserialize (Buffer::Iterator start)
           return 0;
         }
     }
+
+  m_hasFinalDestination = false;
+  m_finalDestination = Ipv4Address();
+  m_hasButterflyInfo = false;
+  m_butterflyHopRole = BUTTERFLY_HOP_NONE;
+
+  while (start.GetRemainingSize () >= 8)
+    {
+      Buffer::Iterator temp = start;
+      uint32_t signature = temp.ReadNtohU32();
+      if (signature == kNcHeaderMetaSignature)
+        {
+          uint32_t addr = temp.ReadNtohU32();
+          m_finalDestination = Ipv4Address(addr);
+          m_hasFinalDestination = true;
+          start = temp;
+          continue;
+        }
+      if (signature == kNcHeaderButterflySignature && temp.GetRemainingSize() >= 40)
+        {
+          m_butterflyInfo.butterflyId = temp.ReadNtohU32();
+          m_butterflyInfo.sourceNode = temp.ReadNtohU32();
+          m_butterflyInfo.r1 = temp.ReadNtohU32();
+          m_butterflyInfo.r2 = temp.ReadNtohU32();
+          m_butterflyInfo.r3 = temp.ReadNtohU32();
+          m_butterflyInfo.r4 = temp.ReadNtohU32();
+          m_butterflyInfo.d1 = temp.ReadNtohU32();
+          m_butterflyInfo.d2 = temp.ReadNtohU32();
+          m_butterflyInfo.targetExitNode = temp.ReadNtohU32();
+          m_butterflyHopRole = temp.ReadU8();
+          temp.ReadU8();
+          temp.ReadU8();
+          temp.ReadU8();
+          m_hasButterflyInfo = true;
+          start = temp;
+          continue;
+        }
+      break;
+    }
   
   return GetSerializedSize ();
 }
@@ -193,7 +313,16 @@ NetworkCodingHeader::GetSerializedSize (void) const
 {
   // 8 (hop) + 4 (genId) + 2 (genSize) + 2 (numCoeffs) + N (coeffs)
   // The number of coefficients written is always equal to the generation size due to padding.
-  return 8 + 4 + 2 + 2 + m_generationSize;
+  uint32_t size = 8 + 4 + 2 + 2 + m_generationSize;
+  if (m_hasFinalDestination)
+    {
+      size += 8; // signature + IPv4 address
+    }
+  if (m_hasButterflyInfo)
+    {
+      size += 4 /*signature*/ + 9 * sizeof(uint32_t) + 4; // nodes + padding
+    }
+  return size;
 }
 
 void 
@@ -214,6 +343,23 @@ NetworkCodingHeader::Print (std::ostream &os) const
     }
   
   os << "]";
+  if (m_hasFinalDestination)
+    {
+      os << " FinalDest: " << m_finalDestination;
+    }
+  if (m_hasButterflyInfo)
+    {
+      os << " ButterflyId: " << m_butterflyInfo.butterflyId
+         << " Role=" << static_cast<uint32_t>(m_butterflyHopRole)
+         << " Nodes(s=" << m_butterflyInfo.sourceNode
+         << ", r1=" << m_butterflyInfo.r1
+         << ", r2=" << m_butterflyInfo.r2
+         << ", r3=" << m_butterflyInfo.r3
+         << ", r4=" << m_butterflyInfo.r4
+         << ", d1=" << m_butterflyInfo.d1
+         << ", d2=" << m_butterflyInfo.d2
+         << ", target=" << m_butterflyInfo.targetExitNode << ")";
+    }
 }
 
 //----------------------------------------------------------------------------
