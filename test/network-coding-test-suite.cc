@@ -21,6 +21,7 @@
 #include "network-coding-test-suite.h"
 #include "ns3/log.h"
 #include "ns3/packet.h"
+#include "ns3/network-coding-packet.h"
 #include "ns3/simulator.h"
 #include <random>
 
@@ -338,9 +339,39 @@ NetworkCodingTestCase::TestCodingWithLoss (uint32_t packetSize, uint16_t generat
 // NetworkCodingTestSuite implementation
 //-----------------------------------------------------------------------------
 
+class PacketMetadataTest : public TestCase
+{
+public:
+  PacketMetadataTest() : TestCase("packet metadata and payload boundary") {}
+  void DoRun() override
+  {
+    const uint8_t payload[] = {0x4e, 0x43, 0x4d, 0x44, 1, 2, 3, 4, 5, 6};
+    for (int mode = 0; mode < 4; ++mode)
+      {
+        Ptr<Packet> packet = Create<Packet>(payload, sizeof(payload));
+        NetworkCodingHeader sent;
+        sent.SetGenerationSize(2); sent.SetCoefficients({1, 0});
+        if (mode & 1) sent.SetFinalDestination(Ipv4Address("10.1.2.3"));
+        if (mode & 2) { ButterflyHeaderInfo info; info.r3 = 37; sent.SetButterflyInfo(info); sent.SetButterflyHopRole(BUTTERFLY_HOP_R3_TO_R4); }
+        packet->AddHeader(sent);
+        NetworkCodingHeader received;
+        uint32_t removed = packet->RemoveHeader(received);
+        NS_TEST_ASSERT_MSG_EQ(removed, sent.GetSerializedSize(), "header size");
+        NS_TEST_ASSERT_MSG_EQ(received.HasFinalDestination(), bool(mode & 1), "destination flag");
+        NS_TEST_ASSERT_MSG_EQ(received.HasButterflyInfo(), bool(mode & 2), "butterfly flag");
+        if (mode & 2) { NS_TEST_ASSERT_MSG_EQ(received.GetButterflyInfo().r3, 37, "butterfly node"); }
+        NS_TEST_ASSERT_MSG_EQ(packet->GetSize(), sizeof(payload), "payload size");
+        uint8_t copy[sizeof(payload)] = {};
+        packet->CopyData(copy, sizeof(copy));
+        for (size_t i = 0; i < sizeof(payload); ++i) { NS_TEST_ASSERT_MSG_EQ(copy[i], payload[i], "payload byte"); }
+      }
+  }
+};
+
 NetworkCodingTestSuite::NetworkCodingTestSuite ()
   : TestSuite ("network-coding", Type::UNIT)
 {
+  AddTestCase (new PacketMetadataTest, Duration::QUICK);
   AddTestCase (new GaloisFieldTestCase, Duration::QUICK);
   AddTestCase (new NetworkCodingTestCase, Duration::QUICK);
 }
