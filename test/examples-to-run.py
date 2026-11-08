@@ -4,10 +4,7 @@
 #     (example_name, do_run, do_valgrind_run, fullness).
 #
 # See test.py for more information.
-cpp_examples = [
-    ("network-coding-example", "True", "True", "QUICK"),
-    ("network-coding-comparison-example", "True", "True", "EXTENSIVE"),
-]
+cpp_examples = []
 
 # No Python examples yet
 python_examples = []

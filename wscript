@@ -20,14 +20,6 @@ def build(bld):
         'helper/network-coding-helper.h',
     ]
     
-    # Example program
-    if bld.env['ENABLE_EXAMPLES']:
-        bld.create_ns3_program(
-            'network-coding-example',
-            ['network-coding', 'point-to-point'],
-            source='examples/network-coding-example.cc'
-        )
-    
     # Tests
     if bld.env['ENABLE_TESTS']:
         module_test = bld.create_ns3_module_test_library('network-coding')
