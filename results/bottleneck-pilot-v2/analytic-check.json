@@ -1,0 +1,24 @@
+{
+  "analytical_latency_and_byte_oracles": "PASS",
+  "cases": [
+    {
+      "central_rate": "1Mbps",
+      "central_delay_ms": 10.0,
+      "predicted_nc_completion_ms": 24.1592,
+      "measured_nc_completion_ms": 24.159199999999935
+    },
+    {
+      "central_rate": "10Mbps",
+      "central_delay_ms": 10.0,
+      "predicted_nc_completion_ms": 16.4336,
+      "measured_nc_completion_ms": 16.433600000000048
+    },
+    {
+      "central_rate": "10Mbps",
+      "central_delay_ms": 1.0,
+      "predicted_nc_completion_ms": 7.433600000000001,
+      "measured_nc_completion_ms": 7.433599999999929
+    }
+  ],
+  "limitation": "Loss-free, one-generation, fixed topology only."
+}

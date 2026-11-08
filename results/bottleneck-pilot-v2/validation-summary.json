@@ -1,0 +1,11 @@
+{
+  "unit_suite": "PASS",
+  "detector_fixtures": "PASS",
+  "known_olsr_xor_and_payload": "PASS",
+  "olsr_role_mappings_checked": 3,
+  "fixed_nc_payload_and_data_counts": "PASS",
+  "trace_and_independent_pcap_accounting": "PASS",
+  "data_and_ack_loss_recovery": "PASS",
+  "bounded_retry_exhaustion": "PASS",
+  "limitation": "Fixture-level validation; no statistical coding-gain conclusion."
+}

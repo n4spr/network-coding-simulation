@@ -1,0 +1,182 @@
+[
+  {
+    "central_rate": "1Mbps",
+    "central_delay_ms": 10.0,
+    "error_rate": 0,
+    "runs": 1,
+    "nc_successes": 1,
+    "nc_mean_completion_ms": 24.159199999999935,
+    "nc_mean_ppp_bytes": 10062,
+    "nc_completion_wilson95": null,
+    "tcp_successes": 1,
+    "tcp_mean_completion_ms": 8.512000000000075,
+    "tcp_mean_ppp_bytes": 11032,
+    "tcp_completion_wilson95": null,
+    "paired_successes": 1,
+    "mean_paired_nc_minus_tcp_ms": 15.647199999999861
+  },
+  {
+    "central_rate": "1Mbps",
+    "central_delay_ms": 10.0,
+    "error_rate": 0.01,
+    "runs": 10,
+    "nc_successes": 10,
+    "nc_mean_completion_ms": 124.15919999999994,
+    "nc_mean_ppp_bytes": 10276.6,
+    "nc_completion_wilson95": [
+      0.7224672001371107,
+      0.9999999999999999
+    ],
+    "tcp_successes": 10,
+    "tcp_mean_completion_ms": 409.46448000000004,
+    "tcp_mean_ppp_bytes": 11392.2,
+    "tcp_completion_wilson95": [
+      0.7224672001371107,
+      0.9999999999999999
+    ],
+    "paired_successes": 10,
+    "mean_paired_nc_minus_tcp_ms": -285.30528000000015
+  },
+  {
+    "central_rate": "1Mbps",
+    "central_delay_ms": 10.0,
+    "error_rate": 0.05,
+    "runs": 10,
+    "nc_successes": 10,
+    "nc_mean_completion_ms": 374.15919999999994,
+    "nc_mean_ppp_bytes": 11148.5,
+    "nc_completion_wilson95": [
+      0.7224672001371107,
+      0.9999999999999999
+    ],
+    "tcp_successes": 10,
+    "tcp_mean_completion_ms": 1111.0564801,
+    "tcp_mean_ppp_bytes": 12471.2,
+    "tcp_completion_wilson95": [
+      0.7224672001371107,
+      0.9999999999999999
+    ],
+    "paired_successes": 10,
+    "mean_paired_nc_minus_tcp_ms": -736.8972801000001
+  },
+  {
+    "central_rate": "1Mbps",
+    "central_delay_ms": 10.0,
+    "error_rate": 0.1,
+    "runs": 10,
+    "nc_successes": 10,
+    "nc_mean_completion_ms": 474.1592,
+    "nc_mean_ppp_bytes": 11698.5,
+    "nc_completion_wilson95": [
+      0.7224672001371107,
+      0.9999999999999999
+    ],
+    "tcp_successes": 10,
+    "tcp_mean_completion_ms": 2211.6780802,
+    "tcp_mean_ppp_bytes": 13575,
+    "tcp_completion_wilson95": [
+      0.7224672001371107,
+      0.9999999999999999
+    ],
+    "paired_successes": 10,
+    "mean_paired_nc_minus_tcp_ms": -1737.5188802
+  },
+  {
+    "central_rate": "10Mbps",
+    "central_delay_ms": 10.0,
+    "error_rate": 0,
+    "runs": 1,
+    "nc_successes": 1,
+    "nc_mean_completion_ms": 16.433600000000048,
+    "nc_mean_ppp_bytes": 10062,
+    "nc_completion_wilson95": null,
+    "tcp_successes": 1,
+    "tcp_mean_completion_ms": 8.512000000000075,
+    "tcp_mean_ppp_bytes": 11032,
+    "tcp_completion_wilson95": null,
+    "paired_successes": 1,
+    "mean_paired_nc_minus_tcp_ms": 7.921599999999973
+  },
+  {
+    "central_rate": "10Mbps",
+    "central_delay_ms": 10.0,
+    "error_rate": 0.01,
+    "runs": 10,
+    "nc_successes": 10,
+    "nc_mean_completion_ms": 116.43360000000006,
+    "nc_mean_ppp_bytes": 10276.6,
+    "nc_completion_wilson95": [
+      0.7224672001371107,
+      0.9999999999999999
+    ],
+    "tcp_successes": 10,
+    "tcp_mean_completion_ms": 409.46448000000004,
+    "tcp_mean_ppp_bytes": 11392.2,
+    "tcp_completion_wilson95": [
+      0.7224672001371107,
+      0.9999999999999999
+    ],
+    "paired_successes": 10,
+    "mean_paired_nc_minus_tcp_ms": -293.03087999999997
+  },
+  {
+    "central_rate": "10Mbps",
+    "central_delay_ms": 10.0,
+    "error_rate": 0.05,
+    "runs": 10,
+    "nc_successes": 10,
+    "nc_mean_completion_ms": 366.4336,
+    "nc_mean_ppp_bytes": 11148.5,
+    "nc_completion_wilson95": [
+      0.7224672001371107,
+      0.9999999999999999
+    ],
+    "tcp_successes": 10,
+    "tcp_mean_completion_ms": 1111.0564801,
+    "tcp_mean_ppp_bytes": 12471.2,
+    "tcp_completion_wilson95": [
+      0.7224672001371107,
+      0.9999999999999999
+    ],
+    "paired_successes": 10,
+    "mean_paired_nc_minus_tcp_ms": -744.6228801
+  },
+  {
+    "central_rate": "10Mbps",
+    "central_delay_ms": 10.0,
+    "error_rate": 0.1,
+    "runs": 10,
+    "nc_successes": 10,
+    "nc_mean_completion_ms": 466.43360000000007,
+    "nc_mean_ppp_bytes": 11698.5,
+    "nc_completion_wilson95": [
+      0.7224672001371107,
+      0.9999999999999999
+    ],
+    "tcp_successes": 10,
+    "tcp_mean_completion_ms": 2211.6780802,
+    "tcp_mean_ppp_bytes": 13575,
+    "tcp_completion_wilson95": [
+      0.7224672001371107,
+      0.9999999999999999
+    ],
+    "paired_successes": 10,
+    "mean_paired_nc_minus_tcp_ms": -1745.2444802
+  },
+  {
+    "central_rate": "10Mbps",
+    "central_delay_ms": 1.0,
+    "error_rate": 0,
+    "runs": 1,
+    "nc_successes": 1,
+    "nc_mean_completion_ms": 7.433599999999929,
+    "nc_mean_ppp_bytes": 10062,
+    "nc_completion_wilson95": null,
+    "tcp_successes": 1,
+    "tcp_mean_completion_ms": 8.512000000000075,
+    "tcp_mean_ppp_bytes": 11032,
+    "tcp_completion_wilson95": null,
+    "paired_successes": 1,
+    "mean_paired_nc_minus_tcp_ms": -1.078400000000146
+  }
+]
